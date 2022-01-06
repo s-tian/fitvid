@@ -33,6 +33,7 @@ import jax
 from jax import lax
 import jax.numpy as jnp
 from fitvid import data
+from fitvid import robomimic_data
 from fitvid import models
 from fitvid import utils
 from fitvid.metrics import fvd
@@ -52,6 +53,7 @@ flags.DEFINE_integer('n_past', 2, 'Number of past frames.')
 flags.DEFINE_integer('n_future', 10, 'Number of future frames.')
 flags.DEFINE_integer('training_steps', 10000000, 'Number of training steps.')
 flags.DEFINE_integer('log_every', 1000, 'How frequently log.')
+flags.DEFINE_integer('dataset_file', None, 'Dataset to load.')
 
 
 MODEL_CLS = models.FitVid
@@ -154,7 +156,13 @@ def get_log_directories():
 def get_data(training):
   video_len = FLAGS.n_past + FLAGS.n_future
   local_batch_size = FLAGS.batch_size // jax.host_count()
-  return data.load_dataset_robonet(local_batch_size, video_len, training)
+    
+  if FLAGS.dataset_file is None:
+    print('Loading RoboNet dataset...')
+    return data.load_dataset_robonet(local_batch_size, video_len, training)
+  else:
+    print(f'Loading RoboMimic dataset from file {FLAGS.dataset_file}...')
+    return robomimic_data.load_dataset_robomimic(FLAGS.dataset_file, local_batch_size, video_len, training)
 
 
 def init_model_state(rng_key, model, sample):
