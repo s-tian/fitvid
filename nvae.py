@@ -124,7 +124,7 @@ class ModularEncoder(nn.Module):
   encoder_block: Callable
   down_block: Callable
   num_classes: int
-  num_filters: int = 64
+  num_filters: int = 16 
   dtype: Any = jnp.float32
 
   @nn.compact
@@ -161,7 +161,8 @@ class ModularDecoder(nn.Module):
   decoder_block: Callable
   up_block: Callable
   first_block_shape: Sequence[int]
-  num_filters: int = 64
+  num_filters: int = 16 
+  output_channels: int = 3
   dtype: Any = jnp.float32
 
   @nn.compact
@@ -195,7 +196,7 @@ class ModularDecoder(nn.Module):
           raise Exception('Unknown Skip Type.')
 
     print('D', i, j, x.shape)
-    x = conv(3, (3, 3))(x)
+    x = conv(self.output_channels, (3, 3))(x)
     x = nn.sigmoid(x)
     x = jnp.asarray(x, self.dtype)
     return x

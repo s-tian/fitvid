@@ -47,7 +47,7 @@ def eval_model():
   log_dir = os.path.join(FLAGS.output_dir, 'evaluate')
   summary_writer = tensorboard.SummaryWriter(log_dir)
 
-  data_itr = get_data(False)
+  data_itr = get_data(False, depth=FLAGS.depth)
   batch = next(data_itr)
   sample = utils.get_first_device(batch)
 

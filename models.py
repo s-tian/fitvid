@@ -19,7 +19,7 @@
 import functools
 
 from flax import linen as nn
-from flax.nn import initializers
+from flax.linen import initializers
 import jax
 import jax.numpy as jnp
 
@@ -71,24 +71,27 @@ class MultiGaussianLSTM(nn.Module):
 class FitVid(nn.Module):
   """FitVid video predictor."""
   training: bool
+  testing: bool = False
   stochastic: bool = True
   action_conditioned: bool = True
   z_dim: int = 10
-  g_dim: int = 128
+  g_dim: int = 64 
   rnn_size: int = 256
   n_past: int = 2
   beta: float = 1e-4
   dtype: int = jnp.float32
+  output_channels: int = 3
 
   def setup(self):
     self.encoder = nvae.NVAE_ENCODER_VIDEO(
         training=self.training,
-        stage_sizes=[2, 2, 2, 2],
+        stage_sizes=[1, 1, 1, 1],
         num_classes=self.g_dim)
     self.decoder = nvae.NVAE_DECODER_VIDEO(
         training=self.training,
-        stage_sizes=[2, 2, 2, 2],
+        stage_sizes=[1, 1, 1, 1],
         first_block_shape=(8, 8, 512),
+        output_channels=self.output_channels,
         skip_type='residual')
     self.frame_predictor = MultiGaussianLSTM(
         hidden_size=self.rnn_size, output_size=self.g_dim, num_layers=2)
@@ -118,7 +121,34 @@ class FitVid(nn.Module):
     skips = {k: skips[k][:, self.n_past-1] for k in skips.keys()}
 
     kld, means, logvars = 0.0, [], []
-    if self.training:
+
+    if self.testing:
+      action_len = actions.shape[1]
+      preds, x_pred = [], None
+      for i in range(1, action_len+1):
+        if i <= self.n_past:
+          h = hidden[:, i-1]
+        if i < self.n_past:
+          h_target = hidden[:, i]
+        if i > self.n_past:
+          h = self.encoder(jnp.expand_dims(x_pred, 1))[0][:, 0]
+          #h = h_pred
+
+        #post_s, (_, mu, logvar) = self.posterior(h_target, post_s)
+        prior_s, (z_t, prior_mu, prior_logvar) = self.prior(h, prior_s)
+
+        inp = self.get_input(h, actions[:, i-1], z_t)
+        pred_s, (_, h_pred, _) = self.frame_predictor(inp, pred_s)
+        h_pred = nn.sigmoid(h_pred)
+        x_pred = self.decoder(jnp.expand_dims(h_pred, 1), skips)[:, 0]
+        preds.append(x_pred)
+        #means.append(mu)
+        #logvars.append(logvar)
+        #kld += kl(mu, logvar, prior_mu, prior_logvar)
+      kld = 0
+      preds = jnp.stack(preds, axis=1)
+
+    elif self.training:
       h_preds = []
       for i in range(1, video_len):
         h, h_target = hidden[:, i-1], hidden[:, i]
@@ -156,9 +186,12 @@ class FitVid(nn.Module):
         kld += kl(mu, logvar, prior_mu, prior_logvar)
 
       preds = jnp.stack(preds, axis=1)
-
-    means = jnp.stack(means, axis=1)
-    logvars = jnp.stack(logvars, axis=1)
+    
+    if len(means) > 0:
+        means = jnp.stack(means, axis=1)
+        logvars = jnp.stack(logvars, axis=1)
+    else:
+        mean, logvars = 0, 0
     mse = utils.l2_loss(preds, video[:, 1:])
     loss = mse + kld * self.beta
 

@@ -1,11 +1,12 @@
 import jax
+import torch
 
 from robomimic.utils.dataset import SequenceDataset
 import robomimic.utils.obs_utils as ObsUtils
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, ConcatDataset
 
 
-def get_data_loader(dataset_path, batch_size, video_len, phase):
+def get_data_loader(dataset_paths, batch_size, video_len, phase, depth):
     """
     Get a data loader to sample batches of data.
     """
@@ -17,58 +18,71 @@ def get_data_loader(dataset_path, batch_size, video_len, phase):
         }
     })
 
-    dataset = SequenceDataset(
-        hdf5_path=dataset_path,
-        obs_keys=(                      # observations we want to appear in batches
-            "agentview_image",
-        ),
-        dataset_keys=(                  # can optionally specify more keys here if they should appear in batches
-            "actions", 
-            "rewards", 
-            "dones",
-        ),
-        load_next_obs=True,
-        frame_stack=1,
-        seq_length=video_len,                  # length-10 temporal sequences
-        pad_frame_stack=True,
-        pad_seq_length=False,            # pad last obs per trajectory to ensure all sequences are sampled
-        get_pad_mask=False,
-        goal_mode=None,
-        hdf5_cache_mode=None,          # cache dataset in memory to avoid repeated file i/o
-        hdf5_use_swmr=True,
-        hdf5_normalize_obs=False,
-        filter_by_attribute=phase,       # filter either train or validation data
-    )
-    print("\n============= Created Dataset =============")
-    print(dataset)
-    print("")
+    all_datasets = []
+
+    for i, dataset_path in enumerate(dataset_paths):
+        if depth:
+            obs_keys = ("agentview_depth",)
+        else:
+            obs_keys = ("agentview_image",)
+        dataset = SequenceDataset(
+            hdf5_path=dataset_path,
+            obs_keys=obs_keys,                      # observations we want to appear in batches
+            dataset_keys=(                  # can optionally specify more keys here if they should appear in batches
+                "actions", 
+                "rewards", 
+                "dones",
+            ),
+            load_next_obs=True,
+            frame_stack=1,
+            seq_length=video_len,                  # length-10 temporal sequences
+            pad_frame_stack=True,
+            pad_seq_length=False,            # pad last obs per trajectory to ensure all sequences are sampled
+            get_pad_mask=False,
+            goal_mode=None,
+            hdf5_cache_mode="low_dim",          # cache dataset in memory to avoid repeated file i/o
+            hdf5_use_swmr=True,
+            hdf5_normalize_obs=False,
+            filter_by_attribute=phase,       # filter either train or validation data
+        )
+        all_datasets.append(dataset)
+        print(f"\n============= Created Dataset {i+1} out of {len(dataset_paths)} =============")
+        print(dataset)
+        print("")
+
+    dataset = ConcatDataset(all_datasets)
 
     data_loader = DataLoader(
         dataset=dataset,
         sampler=None,       # no custom sampling logic (uniform sampling)
         batch_size=batch_size,     
         shuffle=True,
-        num_workers=0,
+        num_workers=4,
         drop_last=True      # don't provide last batch in dataset pass if it's less than 100 in size
     )
     return data_loader 
 
 
-def load_dataset_robomimic(dataset_path, batch_size, video_len, is_train):
+def load_dataset_robomimic(dataset_path, batch_size, video_len, is_train, depth):
     if is_train:
         phase = 'train'
     else:
-        phase = 'val'
+        phase = 'valid'
 
-    loader = get_data_loader(dataset_path, batch_size, video_len, phase)
+    loader = get_data_loader(dataset_path, batch_size, video_len, phase, depth)
     local_device_count = jax.local_device_count()
-
+    
     def prepare_data(xs):
-
-        xs = {
-            'videos': xs['obs']['agentview_image'],
-            'actions': xs['actions']
-        }
+        if depth:
+            xs = {
+                'video': torch.permute(xs['obs']['agentview_depth'], (0, 1, 3, 4, 2)),
+                'actions': xs['actions']
+            }
+        else:
+            xs = {
+                'video': torch.permute(xs['obs']['agentview_image'], (0, 1, 3, 4, 2)),
+                'actions': xs['actions']
+            }
 
         def _prepare(x):
             x = x.numpy()

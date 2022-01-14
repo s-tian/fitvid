@@ -69,6 +69,13 @@ def lpips(video_1, video_2):
 def fvd_preprocess(videos, target_resolution):
   videos = tf.convert_to_tensor(videos * 255.0, dtype=tf.float32)
   videos_shape = videos.shape.as_list()
+  if videos_shape[-1] == 1:
+    # we are using depth images, or something like that
+    #num_dims = len(videos_shape)
+    #repeat_dims = [1] * num_dims
+    #repeat_dims[-1] = 3
+    #videos = tf.tile(videos, tf.constant(repeat_dims, tf.int32))
+    videos = tf.image.grayscale_to_rgb(videos)
   all_frames = tf.reshape(videos, [-1] + videos_shape[-3:])
   resized_videos = tf.image.resize(all_frames, size=target_resolution)
   target_shape = [videos_shape[0], -1] + list(target_resolution) + [3]

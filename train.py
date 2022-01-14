@@ -48,12 +48,13 @@ import tensorflow.compat.v2 as tf
 FLAGS = flags.FLAGS
 
 flags.DEFINE_string('output_dir', None, 'Path to model checkpoints/summaries.')
-flags.DEFINE_integer('batch_size', 128, 'Batch size.')
+flags.DEFINE_boolean('depth', None, 'Use depth image feeds.')
+flags.DEFINE_integer('batch_size', 32, 'Batch size.')
 flags.DEFINE_integer('n_past', 2, 'Number of past frames.')
 flags.DEFINE_integer('n_future', 10, 'Number of future frames.')
 flags.DEFINE_integer('training_steps', 10000000, 'Number of training steps.')
 flags.DEFINE_integer('log_every', 1000, 'How frequently log.')
-flags.DEFINE_integer('dataset_file', None, 'Dataset to load.')
+flags.DEFINE_spaceseplist('dataset_file', [], 'Dataset to load.')
 
 
 MODEL_CLS = models.FitVid
@@ -88,6 +89,7 @@ def write_summaries(summary_writer, metrics, step, vid_out, gt):
 @functools.partial(jax.pmap, axis_name='batch', static_broadcasted_argnums=0)
 def eval_step(model, batch, state, rng):
   """A single evaluation step."""
+  import ipdb; ipdb.set_trace()
   variables = {'params': state.optimizer.target, **state.model_state}
   (_, out_video, metrics), _ = model.apply(
       variables,
@@ -153,16 +155,17 @@ def get_log_directories():
   return model_dir, summary_writer
 
 
-def get_data(training):
+def get_data(training, depth=False):
   video_len = FLAGS.n_past + FLAGS.n_future
-  local_batch_size = FLAGS.batch_size // jax.host_count()
+  local_batch_size = FLAGS.batch_size // jax.process_count()
     
   if FLAGS.dataset_file is None:
+    assert False, "dataset file not specified!"
     print('Loading RoboNet dataset...')
     return data.load_dataset_robonet(local_batch_size, video_len, training)
   else:
-    print(f'Loading RoboMimic dataset from file {FLAGS.dataset_file}...')
-    return robomimic_data.load_dataset_robomimic(FLAGS.dataset_file, local_batch_size, video_len, training)
+    print(f'Loading RoboMimic dataset from files {FLAGS.dataset_file}...')
+    return robomimic_data.load_dataset_robomimic(FLAGS.dataset_file, local_batch_size, video_len, training, depth)
 
 
 def init_model_state(rng_key, model, sample):
@@ -209,13 +212,12 @@ def train():
   log_every = FLAGS.log_every
 
   model_dir, summary_writer = get_log_directories()
-  data_itr = get_data(True)
+  data_itr = get_data(True, depth=FLAGS.depth)
 
   batch = next(data_itr)
   sample = utils.get_first_device(batch)
 
-  model = MODEL_CLS(n_past=FLAGS.n_past, training=True)
-
+  model = MODEL_CLS(n_past=FLAGS.n_past, training=True, output_channels=1 if FLAGS.depth else 3)
   state = init_model_state(rng_key, model, sample)
   state = checkpoints.restore_checkpoint(model_dir, state)
   start_step = int(state.step)
