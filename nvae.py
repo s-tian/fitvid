@@ -124,7 +124,7 @@ class ModularEncoder(nn.Module):
   encoder_block: Callable
   down_block: Callable
   num_classes: int
-  num_filters: int = 16 
+  num_filters: int = 32 
   dtype: Any = jnp.float32
 
   @nn.compact
@@ -161,7 +161,7 @@ class ModularDecoder(nn.Module):
   decoder_block: Callable
   up_block: Callable
   first_block_shape: Sequence[int]
-  num_filters: int = 16 
+  num_filters: int = 32 
   output_channels: int = 3
   dtype: Any = jnp.float32
 
