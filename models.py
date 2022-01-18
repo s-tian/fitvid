@@ -25,6 +25,7 @@ import jax.numpy as jnp
 
 from fitvid import nvae
 from fitvid import utils
+from fitvid.film import FiLM
 
 
 class MultiGaussianLSTM(nn.Module):
@@ -74,6 +75,7 @@ class FitVid(nn.Module):
   testing: bool = False
   stochastic: bool = True
   action_conditioned: bool = True
+  use_film: bool = False
   z_dim: int = 10
   g_dim: int = 128 
   rnn_size: int = 256
@@ -99,11 +101,16 @@ class FitVid(nn.Module):
         hidden_size=self.rnn_size, output_size=self.z_dim, num_layers=1)
     self.prior = MultiGaussianLSTM(
         hidden_size=self.rnn_size, output_size=self.z_dim, num_layers=1)
+    if self.use_film:
+        self.film = FiLM()
 
   def get_input(self, hidden, action, z):
     inp = [hidden]
     if self.action_conditioned:
-      inp += [action]
+      if self.use_film:
+        inp = self.film(inp, action)
+      else:
+        inp += [action]
     if self.stochastic:
       inp += [z]
     return jnp.concatenate(inp, axis=1)

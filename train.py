@@ -49,6 +49,7 @@ FLAGS = flags.FLAGS
 
 flags.DEFINE_string('output_dir', None, 'Path to model checkpoints/summaries.')
 flags.DEFINE_boolean('depth', None, 'Use depth image feeds.')
+flags.DEFINE_boolean('film', None, 'Use film action conditioning layers.')
 flags.DEFINE_integer('batch_size', 32, 'Batch size.')
 flags.DEFINE_integer('n_past', 2, 'Number of past frames.')
 flags.DEFINE_integer('n_future', 10, 'Number of future frames.')
@@ -217,7 +218,7 @@ def train():
   batch = next(data_itr)
   sample = utils.get_first_device(batch)
 
-  model = MODEL_CLS(n_past=FLAGS.n_past, training=True, output_channels=1 if FLAGS.depth else 3)
+  model = MODEL_CLS(n_past=FLAGS.n_past, training=True, output_channels=1 if FLAGS.depth else 3, use_film = FLAGS.film)
   state = init_model_state(rng_key, model, sample)
   state = checkpoints.restore_checkpoint(model_dir, state)
   start_step = int(state.step)
