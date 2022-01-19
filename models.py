@@ -87,11 +87,11 @@ class FitVid(nn.Module):
   def setup(self):
     self.encoder = nvae.NVAE_ENCODER_VIDEO(
         training=self.training,
-        stage_sizes=[2, 2, 2, 2],
+        stage_sizes=[1, 1, 1, 1],
         num_classes=self.g_dim)
     self.decoder = nvae.NVAE_DECODER_VIDEO(
         training=self.training,
-        stage_sizes=[2, 2, 2, 2],
+        stage_sizes=[1, 1, 1, 1],
         first_block_shape=(8, 8, 512),
         output_channels=self.output_channels,
         skip_type='residual')
@@ -108,7 +108,7 @@ class FitVid(nn.Module):
     inp = [hidden]
     if self.action_conditioned:
       if self.use_film:
-        inp = self.film(inp, action)
+        inp = [self.film(inp[0], action)]
       else:
         inp += [action]
     if self.stochastic:
