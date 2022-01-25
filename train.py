@@ -90,7 +90,6 @@ def write_summaries(summary_writer, metrics, step, vid_out, gt):
 @functools.partial(jax.pmap, axis_name='batch', static_broadcasted_argnums=0)
 def eval_step(model, batch, state, rng):
   """A single evaluation step."""
-  import ipdb; ipdb.set_trace()
   variables = {'params': state.optimizer.target, **state.model_state}
   (_, out_video, metrics), _ = model.apply(
       variables,
@@ -187,6 +186,8 @@ def init_model_state(rng_key, model, sample):
 def evaluate(rng_key, state, model, data_itr, eval_steps):
   """Evaluates the model on the entire dataset."""
   all_metrics = []
+  gts = []
+  out_videos = []
   for _ in range(eval_steps):
     batch = next(data_itr)
     gt, out_video, metrics = eval_step(model, batch, state, rng_key)
@@ -198,12 +199,14 @@ def evaluate(rng_key, state, model, data_itr, eval_steps):
     metrics = jax.tree_map(get_all, metrics)
     metrics = additional_metrics(metrics, gt, out_video)
     all_metrics.append(metrics)
+    out_videos.append(out_video)
+    gts.append(gt)
 
   if jax.host_id() == 0:
     metrics = {
         k: np.mean([dic[k] for dic in all_metrics]) for k in all_metrics[0]}
     metrics['graphs/psnr'] = psnr_per_frame(gt, out_video)
-  return metrics, gt, out_video
+  return metrics, gts, out_videos
 
 
 def train():
