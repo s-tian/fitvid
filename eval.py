@@ -80,7 +80,7 @@ def log_eval_gifs():
   log_dir = os.path.join(FLAGS.output_dir, 'evaluate')
   summary_writer = tensorboard.SummaryWriter(log_dir)
 
-  data_itr = get_data(False, depth=FLAGS.depth)
+  data_itr = get_data(False, depth=FLAGS.depth_objective)
   batch = next(data_itr)
   sample = utils.get_first_device(batch)
 
@@ -96,6 +96,10 @@ def log_eval_gifs():
     rng_key, state, model, data_itr, eval_steps=256 // FLAGS.batch_size)
 
   # write visualization GIF
+  n_vis = 32
+  out_vid = jnp.concatenate(out_vid, axis=0)
+  gt = jnp.concatenate(gt, axis=0)
+  side_by_side_all = jnp.concatenate((out_vid, gt), axis=2)
 
   def add_border(video):
     # video dimensions are [B, T, H, W, C]
@@ -107,25 +111,22 @@ def log_eval_gifs():
     video = jnp.concatenate((jnp.zeros(border_shape), video, jnp.zeros(border_shape)), axis=2)
     return video
 
-  n_vis = 32
-  out_vid = jnp.concatenate(out_vid, axis=0)
-  gt = jnp.concatenate(gt, axis=0)
-  side_by_side = jnp.concatenate((out_vid, gt), axis=2)
-  side_by_side = add_border(side_by_side[:n_vis])
-  shape = side_by_side.shape
-  # [B, T, W, H, C]
-  new_shape = (4, n_vis // 4 ) + shape[1:]
-  # [4, B/4, T, W, H, C]
-  side_by_side = jnp.reshape(side_by_side, new_shape)
-  side_by_side = jnp.concatenate(side_by_side, axis=2)
-  # [B/4, T, W, H, C]
-  side_by_side = jnp.concatenate(side_by_side, axis=2)
-  side_by_side = side_by_side * 255
-  from moviepy.editor import ImageSequenceClip
-  obs_list = list(np.array(side_by_side))
-  fps= 5
-  clip = ImageSequenceClip(obs_list, fps=fps)
-  clip.write_gif(os.path.join(log_dir, f'eval_samples.gif'), fps=fps)
+  for i in range(256 // n_vis):
+    side_by_side = add_border(side_by_side_all[i*n_vis:(i+1)*n_vis])
+    shape = side_by_side.shape
+    # [B, T, W, H, C]
+    new_shape = (4, n_vis // 4 ) + shape[1:]
+    # [4, B/4, T, W, H, C]
+    side_by_side = jnp.reshape(side_by_side, new_shape)
+    side_by_side = jnp.concatenate(side_by_side, axis=2)
+    # [B/4, T, W, H, C]
+    side_by_side = jnp.concatenate(side_by_side, axis=2)
+    side_by_side = side_by_side * 255
+    from moviepy.editor import ImageSequenceClip
+    obs_list = list(np.array(side_by_side))
+    fps= 5
+    clip = ImageSequenceClip(obs_list, fps=fps)
+    clip.write_gif(os.path.join(log_dir, f'eval_samples_{i}.gif'), fps=fps)
 
 
   if jax.host_id() == 0:
@@ -133,8 +134,6 @@ def log_eval_gifs():
     video_summary = np.concatenate([gt, out_vid], axis=3)
     with tf.io.gfile.GFile(f'{log_dir}/video.npy', 'w') as outfile:
       np.save(outfile, video_summary)
-
-
 
 def main(argv):
   del argv  # Unused

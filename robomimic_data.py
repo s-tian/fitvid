@@ -22,7 +22,7 @@ def get_data_loader(dataset_paths, batch_size, video_len, phase, depth):
 
     for i, dataset_path in enumerate(dataset_paths):
         if depth:
-            obs_keys = ("agentview_depth",)
+            obs_keys = ("agentview_image", "agentview_depth",)
         else:
             obs_keys = ("agentview_image",)
         dataset = SequenceDataset(
@@ -57,7 +57,7 @@ def get_data_loader(dataset_paths, batch_size, video_len, phase, depth):
         sampler=None,       # no custom sampling logic (uniform sampling)
         batch_size=batch_size,     
         shuffle=True,
-        num_workers=4,
+        num_workers=2,
         drop_last=True      # don't provide last batch in dataset pass if it's less than 100 in size
     )
     return data_loader 
@@ -73,21 +73,17 @@ def load_dataset_robomimic(dataset_path, batch_size, video_len, is_train, depth)
     local_device_count = jax.local_device_count()
     
     def prepare_data(xs):
+        data_dict = {
+            'video': torch.permute(xs['obs']['agentview_image'], (0, 1, 3, 4, 2)),
+            'actions': xs['actions']
+        }
         if depth:
-            xs = {
-                'video': torch.permute(xs['obs']['agentview_depth'], (0, 1, 3, 4, 2)),
-                'actions': xs['actions']
-            }
-        else:
-            xs = {
-                'video': torch.permute(xs['obs']['agentview_image'], (0, 1, 3, 4, 2)),
-                'actions': xs['actions']
-            }
+            data_dict['depth_video'] = torch.permute(xs['obs']['agentview_depth'], (0, 1, 3, 4, 2))
 
         def _prepare(x):
             x = x.numpy()
             return jax.device_put(x.reshape((local_device_count, -1) + x.shape[1:]))
-        prepared = jax.tree_map(_prepare, xs)
+        prepared = jax.tree_map(_prepare, data_dict)
 
         return prepared
     

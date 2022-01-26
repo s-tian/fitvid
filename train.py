@@ -48,9 +48,11 @@ import tensorflow.compat.v2 as tf
 FLAGS = flags.FLAGS
 
 flags.DEFINE_string('output_dir', None, 'Path to model checkpoints/summaries.')
-flags.DEFINE_boolean('depth', None, 'Use depth image feeds.')
+flags.DEFINE_boolean('depth_objective', None, 'Use depth image decoding as a auxiliary objective.')
 flags.DEFINE_boolean('film', None, 'Use film action conditioning layers.')
 flags.DEFINE_integer('batch_size', 32, 'Batch size.')
+flags.DEFINE_integer('g_dim', 128, 'g dim.')
+flags.DEFINE_integer('rnn_size', 256, 'rnn size.')
 flags.DEFINE_integer('n_past', 2, 'Number of past frames.')
 flags.DEFINE_integer('n_future', 10, 'Number of future frames.')
 flags.DEFINE_integer('training_steps', 10000000, 'Number of training steps.')
@@ -91,13 +93,14 @@ def write_summaries(summary_writer, metrics, step, vid_out, gt):
 def eval_step(model, batch, state, rng):
   """A single evaluation step."""
   variables = {'params': state.optimizer.target, **state.model_state}
-  (_, out_video, metrics), _ = model.apply(
+  (_, out_video, metrics) = model.apply(
       variables,
       video=batch['video'],
       actions=batch['actions'],
+      depth_video=batch.get('depth_video', None),
       rngs=utils.generate_rng_dict(rng),
-      step=state.step,
-      mutable=['batch_stats'])
+      step=state.step,)
+      #mutable=['batch_stats'])
   n_past = FLAGS.n_past
   out_video = jax.lax.all_gather(out_video[:, n_past-1:], axis_name='batch')
   gt = jax.lax.all_gather(batch['video'][:, n_past:], axis_name='batch')
@@ -116,6 +119,7 @@ def train_step(model, batch, state, rng):
         variables,
         video=batch['video'],
         actions=batch['actions'],
+        depth_video=batch.get('depth_video', None),
         rngs=utils.generate_rng_dict(rng),
         step=state.step,
         mutable=['batch_stats'])
@@ -151,8 +155,10 @@ def get_log_directories():
   output_dir = FLAGS.output_dir
   model_dir = os.path.join(output_dir, 'model')
   log_dir = os.path.join(output_dir, 'train')
+  eval_log_dir = os.path.join(output_dir, 'evaluate')
   summary_writer = tensorboard.SummaryWriter(log_dir)
-  return model_dir, summary_writer
+  eval_summary_writer = tensorboard.SummaryWriter(eval_log_dir)
+  return model_dir, summary_writer, eval_summary_writer
 
 
 def get_data(training, depth=False):
@@ -174,6 +180,7 @@ def init_model_state(rng_key, model, sample):
       rngs=utils.generate_rng_dict(rng_key),
       video=sample['video'],
       actions=sample['actions'],
+      depth_video=sample.get('depth_video', None),
       step=0)
   model_state, params = variables.pop('params')
 
@@ -215,13 +222,19 @@ def train():
   training_steps = FLAGS.training_steps
   log_every = FLAGS.log_every
 
-  model_dir, summary_writer = get_log_directories()
-  data_itr = get_data(True, depth=FLAGS.depth)
+  model_dir, summary_writer, eval_summary_writer = get_log_directories()
+  data_itr = get_data(True, depth=FLAGS.depth_objective)
+  eval_data_itr = get_data(True, depth=FLAGS.depth_objective)
 
   batch = next(data_itr)
   sample = utils.get_first_device(batch)
 
-  model = MODEL_CLS(n_past=FLAGS.n_past, training=True, output_channels=1 if FLAGS.depth else 3, use_film = FLAGS.film)
+  model = MODEL_CLS(n_past=FLAGS.n_past,
+                    g_dim=FLAGS.g_dim,
+                    rnn_size=FLAGS.rnn_size,
+                    training=True,
+                    depth_head=FLAGS.depth_objective,
+                    use_film=FLAGS.film)
   state = init_model_state(rng_key, model, sample)
   state = checkpoints.restore_checkpoint(model_dir, state)
   start_step = int(state.step)
@@ -237,6 +250,7 @@ def train():
       state = utils.sync_batch_stats(state)
       steps_per_sec = log_every / (time.time() - t_loop_start)
       t_loop_start = time.time()
+
       if jax.host_id() == 0:
         train_metrics = utils.get_average_across_devices(metrics)
         state_ = jax_utils.unreplicate(state)
@@ -248,6 +262,23 @@ def train():
         train_metrics['graphs/psnr'] = psnr_per_frame(gt, out_video)
         write_summaries(summary_writer, train_metrics, step, out_video, gt)
         logging.info('>>> Step: %d Loss: %.4f', step, train_metrics['loss/all'])
+
+      eval_batch = next(eval_data_itr)
+      model.training = False
+      eval_output = eval_step(model, eval_batch, state, rng_key)
+      eval_gt, eval_out, eval_metrics = eval_output
+      model.training = True
+
+      if jax.host_id() == 0:
+        # Log eval
+        eval_metrics = utils.get_average_across_devices(eval_metrics)
+        #eval_out = utils.get_all_devices(eval_out)
+        eval_out = utils.get_all_devices(jax_utils.unreplicate(eval_out))
+        eval_gt = utils.get_all_devices(eval_batch['video'])[:, FLAGS.n_past:]
+        import ipdb; ipdb.set_trace()
+        eval_metrics = additional_metrics(eval_metrics, eval_gt, eval_out)
+        eval_metrics['graphs/psnr'] = psnr_per_frame(eval_gt, eval_out)
+        write_summaries(eval_summary_writer, eval_metrics, step, eval_out, eval_gt)
 
     batch = next(data_itr)
 

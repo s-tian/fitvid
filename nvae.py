@@ -119,7 +119,6 @@ class DecoderBlock(nn.Module):
 
 class ModularEncoder(nn.Module):
   """Modular Encoder."""
-  training: bool
   stage_sizes: Sequence[int]
   encoder_block: Callable
   down_block: Callable
@@ -128,10 +127,10 @@ class ModularEncoder(nn.Module):
   dtype: Any = jnp.float32
 
   @nn.compact
-  def __call__(self, x):
+  def __call__(self, x, training=True):
     conv = functools.partial(nn.Conv, use_bias=False, dtype=self.dtype)
     norm = functools.partial(nn.BatchNorm,
-                             use_running_average=not self.training,
+                             use_running_average=not training,
                              momentum=0.9,
                              epsilon=1e-5,
                              axis_name='time',
@@ -155,7 +154,6 @@ class ModularEncoder(nn.Module):
 
 class ModularDecoder(nn.Module):
   """Modular Decoder."""
-  training: bool
   skip_type: None
   stage_sizes: Sequence[int]
   decoder_block: Callable
@@ -166,10 +164,10 @@ class ModularDecoder(nn.Module):
   dtype: Any = jnp.float32
 
   @nn.compact
-  def __call__(self, x, skips):
+  def __call__(self, x, skips, training=True):
     conv = functools.partial(nn.Conv, use_bias=False, dtype=self.dtype)
     norm = functools.partial(nn.BatchNorm,
-                             use_running_average=not self.training,
+                             use_running_average=not training,
                              momentum=0.9,
                              epsilon=1e-5,
                              axis_name='time',
@@ -192,6 +190,8 @@ class ModularDecoder(nn.Module):
           x = jnp.concatenate(
               [x, skips[(len(self.stage_sizes) - i - 1, block_size - j - 1)]],
               axis=-1)
+        elif self.skip_type == 'none':
+            pass
         elif self.skip_type is not None:
           raise Exception('Unknown Skip Type.')
 
@@ -213,7 +213,7 @@ NVAE_DECODER = functools.partial(
 
 NVAE_ENCODER_VMAP = nn.vmap(
     ModularEncoder,
-    in_axes=1,
+    in_axes=(1, None),
     out_axes=1,
     variable_axes={'params': None, 'batch_stats': None},
     split_rngs={'params': False, 'dropout': False, 'rng': False},
@@ -221,7 +221,7 @@ NVAE_ENCODER_VMAP = nn.vmap(
 
 NVAE_DECODER_VMAP = nn.vmap(
     ModularDecoder,
-    in_axes=(1, None),
+    in_axes=(1, None, None),
     out_axes=1,
     variable_axes={'params': None, 'batch_stats': None},
     split_rngs={'params': False, 'dropout': False, 'rng': False},

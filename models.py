@@ -68,33 +68,40 @@ class MultiGaussianLSTM(nn.Module):
 
 
 
-
 class FitVid(nn.Module):
   """FitVid video predictor."""
   training: bool
   testing: bool = False
   stochastic: bool = True
   action_conditioned: bool = True
+  depth_head: bool = False
   use_film: bool = False
   z_dim: int = 10
   g_dim: int = 128 
   rnn_size: int = 256
   n_past: int = 2
   beta: float = 1e-4
+  depth_weight: float = 1
   dtype: int = jnp.float32
   output_channels: int = 3
 
   def setup(self):
     self.encoder = nvae.NVAE_ENCODER_VIDEO(
-        training=self.training,
         stage_sizes=[1, 1, 1, 1],
         num_classes=self.g_dim)
     self.decoder = nvae.NVAE_DECODER_VIDEO(
-        training=self.training,
         stage_sizes=[1, 1, 1, 1],
         first_block_shape=(8, 8, 512),
         output_channels=self.output_channels,
         skip_type='residual')
+    if self.depth_head:
+        self.depth_decoder = nvae.NVAE_DECODER_VIDEO(
+          stage_sizes=[1, 1, 1, 1],
+          first_block_shape=(8, 8, 512),
+          output_channels=1,
+          num_filters=4,
+          skip_type='none',
+        )
     self.frame_predictor = MultiGaussianLSTM(
         hidden_size=self.rnn_size, output_size=self.g_dim, num_layers=2)
     self.posterior = MultiGaussianLSTM(
@@ -115,7 +122,7 @@ class FitVid(nn.Module):
       inp += [z]
     return jnp.concatenate(inp, axis=1)
 
-  def __call__(self, video, actions, step):
+  def __call__(self, video, actions, depth_video, step):
     batch_size, video_len = video.shape[0], video.shape[1]
     pred_s = self.frame_predictor.init_states(batch_size)
     post_s = self.posterior.init_states(batch_size)
@@ -123,7 +130,7 @@ class FitVid(nn.Module):
     kl = functools.partial(utils.kl_divergence, batch_size=batch_size)
 
     # encode frames
-    hidden, skips = self.encoder(video)
+    hidden, skips = self.encoder(video, self.training)
     # Keep the last available skip only
     skips = {k: skips[k][:, self.n_past-1] for k in skips.keys()}
 
@@ -138,7 +145,7 @@ class FitVid(nn.Module):
         if i < self.n_past:
           h_target = hidden[:, i]
         if i > self.n_past:
-          h = self.encoder(jnp.expand_dims(x_pred, 1))[0][:, 0]
+          h = self.encoder(jnp.expand_dims(x_pred, 1), self.training)[0][:, 0]
           #h = h_pred
 
         #post_s, (_, mu, logvar) = self.posterior(h_target, post_s)
@@ -147,7 +154,7 @@ class FitVid(nn.Module):
         inp = self.get_input(h, actions[:, i-1], z_t)
         pred_s, (_, h_pred, _) = self.frame_predictor(inp, pred_s)
         h_pred = nn.sigmoid(h_pred)
-        x_pred = self.decoder(jnp.expand_dims(h_pred, 1), skips)[:, 0]
+        x_pred = self.decoder(jnp.expand_dims(h_pred, 1), skips, self.training)[:, 0]
         preds.append(x_pred)
         #means.append(mu)
         #logvars.append(logvar)
@@ -171,14 +178,17 @@ class FitVid(nn.Module):
         kld += kl(mu, logvar, prior_mu, prior_logvar)
 
       h_preds = jnp.stack(h_preds, axis=1)
-      preds = self.decoder(h_preds, skips)
+      preds = self.decoder(h_preds, skips, self.training)
+      if self.depth_head:
+        depth_preds = self.depth_decoder(h_preds, skips, self.training)
 
     else:  # eval
       preds, x_pred = [], None
+      depth_preds =[]
       for i in range(1, video_len):
         h, h_target = hidden[:, i-1], hidden[:, i]
         if i > self.n_past:
-          h = self.encoder(jnp.expand_dims(x_pred, 1))[0][:, 0]
+          h = self.encoder(jnp.expand_dims(x_pred, 1), self.training)[0][:, 0]
 
         post_s, (_, mu, logvar) = self.posterior(h_target, post_s)
         prior_s, (z_t, prior_mu, prior_logvar) = self.prior(h, prior_s)
@@ -186,13 +196,17 @@ class FitVid(nn.Module):
         inp = self.get_input(h, actions[:, i-1], z_t)
         pred_s, (_, h_pred, _) = self.frame_predictor(inp, pred_s)
         h_pred = nn.sigmoid(h_pred)
-        x_pred = self.decoder(jnp.expand_dims(h_pred, 1), skips)[:, 0]
+        x_pred = self.decoder(jnp.expand_dims(h_pred, 1), skips, self.training)[:, 0]
+        if self.depth_head:
+          depth_p = self.depth_decoder(jnp.expand_dims(h_pred, 1), skips, self.training)[:, 0]
+          depth_preds.append(depth_p)
         preds.append(x_pred)
         means.append(mu)
         logvars.append(logvar)
         kld += kl(mu, logvar, prior_mu, prior_logvar)
 
       preds = jnp.stack(preds, axis=1)
+      depth_preds = jnp.stack(depth_preds, axis=1)
     
     if len(means) > 0:
         means = jnp.stack(means, axis=1)
@@ -201,7 +215,6 @@ class FitVid(nn.Module):
         mean, logvars = 0, 0
     mse = utils.l2_loss(preds, video[:, 1:])
     loss = mse + kld * self.beta
-
     # Metrics
     metrics = {
         'hist/mean': means,
@@ -210,6 +223,10 @@ class FitVid(nn.Module):
         'loss/kld': kld,
         'loss/all': loss,
     }
+    if self.depth_head and not self.testing:
+      depth_mse = utils.l2_loss(depth_preds, depth_video[:, 1:])
+      loss = loss + depth_mse * self.depth_weight
+      metrics['loss/depth_mse'] = depth_mse
 
     return loss, preds, metrics
 
