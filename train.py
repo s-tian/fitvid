@@ -49,6 +49,7 @@ FLAGS = flags.FLAGS
 
 flags.DEFINE_string('output_dir', None, 'Path to model checkpoints/summaries.')
 flags.DEFINE_boolean('depth_objective', None, 'Use depth image decoding as a auxiliary objective.')
+flags.DEFINE_boolean('depth_weight', 1, 'Weighting on depth loss component')
 flags.DEFINE_boolean('film', None, 'Use film action conditioning layers.')
 flags.DEFINE_integer('batch_size', 32, 'Batch size.')
 flags.DEFINE_integer('g_dim', 128, 'g dim.')
@@ -234,6 +235,7 @@ def train():
                     rnn_size=FLAGS.rnn_size,
                     training=True,
                     depth_head=FLAGS.depth_objective,
+                    depth_weight=FLAGS.depth_weight,
                     use_film=FLAGS.film)
   state = init_model_state(rng_key, model, sample)
   state = checkpoints.restore_checkpoint(model_dir, state)
@@ -272,10 +274,8 @@ def train():
       if jax.host_id() == 0:
         # Log eval
         eval_metrics = utils.get_average_across_devices(eval_metrics)
-        #eval_out = utils.get_all_devices(eval_out)
         eval_out = utils.get_all_devices(jax_utils.unreplicate(eval_out))
         eval_gt = utils.get_all_devices(eval_batch['video'])[:, FLAGS.n_past:]
-        import ipdb; ipdb.set_trace()
         eval_metrics = additional_metrics(eval_metrics, eval_gt, eval_out)
         eval_metrics['graphs/psnr'] = psnr_per_frame(eval_gt, eval_out)
         write_summaries(eval_summary_writer, eval_metrics, step, eval_out, eval_gt)
