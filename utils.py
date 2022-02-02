@@ -25,9 +25,9 @@ from jax import lax
 import jax.numpy as jnp
 import numpy as np
 import tensorflow.compat.v2 as tf
+import moviepy
 
 from tensorboard.plugins.image import metadata
-
 
 @struct.dataclass
 class TrainState:

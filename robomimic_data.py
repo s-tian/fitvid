@@ -60,7 +60,23 @@ def get_data_loader(dataset_paths, batch_size, video_len, phase, depth):
         num_workers=2,
         drop_last=True      # don't provide last batch in dataset pass if it's less than 100 in size
     )
-    return data_loader 
+    return data_loader
+
+
+def load_dataset_robomimic_torch(dataset_path, batch_size, video_len, phase, depth):
+    assert phase in ['train', 'valid'], f'Phase is not one of the acceptable values! Got {phase}'
+
+    loader = get_data_loader(dataset_path, batch_size, video_len, phase, depth)
+    def prepare_data(xs):
+        data_dict = {
+            'video': xs['obs']['agentview_image'],
+            'actions': xs['actions']
+        }
+        if depth:
+            data_dict['depth_video'] = xs['obs']['agentview_depth']
+        return data_dict
+
+    return loader, prepare_data
 
 
 def load_dataset_robomimic(dataset_path, batch_size, video_len, is_train, depth):
