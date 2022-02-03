@@ -8,11 +8,13 @@ from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 import matplotlib.pyplot as plt
 import os
+import glob
 from copy import deepcopy
 from tqdm import tqdm
 import moviepy
 
 from fitvid import robomimic_data
+from fitvid.resize_right.resize_right import resize
 
 FLAGS = flags.FLAGS
 
@@ -43,7 +45,10 @@ flags.DEFINE_integer('save_freq', 10, 'number of steps between checkpoints')
 flags.DEFINE_spaceseplist('dataset_file', [], 'Dataset to load.')
 
 # depth objective
-flags.DEFINE_boolean('depth_objective', None, 'Use depth image decoding as a auxiliary objective.')
+flags.DEFINE_boolean('depth_objective', False, 'Use depth image decoding as a auxiliary objective.')
+flags.DEFINE_float('depth_weight', 100, 'Weight on depth objective.')
+flags.DEFINE_boolean('pretrained_depth_objective', True, 'Instead of using a learned depth model, use a pretrained one.')
+flags.DEFINE_boolean('freeze_pretrained', False, 'Whether to freeze the weights of the pretrained depth model.')
 
 # post hoc analysis
 flags.DEFINE_string('re_eval', 'False', 'Re evaluate all available checkpoints saved.')
@@ -281,10 +286,11 @@ class ModularDecoder(nn.Module):
         else:
             return x # for VAE
 
+
 class FitVid(nn.Module):
     """FitVid video predictor."""
 
-    def __init__(self, stage_sizes, z_dim, g_dim, rnn_size, num_base_filters, first_block_shape, skip_type, n_past, action_conditioned, action_size, is_inference):
+    def __init__(self, stage_sizes, z_dim, g_dim, rnn_size, num_base_filters, first_block_shape, skip_type, n_past, action_conditioned, action_size, is_inference, depth_head):
         super(FitVid, self).__init__()
         self.n_past = n_past
         self.action_conditioned = action_conditioned
@@ -292,6 +298,8 @@ class FitVid(nn.Module):
         self.stochastic = True
         self.is_inference = is_inference
         self.skip_type = skip_type
+        self.depth_head = depth_head
+        self.depth_weight = FLAGS.depth_weight
 
         first_block_shape = [first_block_shape[-1]] + first_block_shape[:2]
         self.encoder = ModularEncoder(stage_sizes=stage_sizes, output_size=g_dim, num_base_filters=num_base_filters)
@@ -299,8 +307,57 @@ class FitVid(nn.Module):
         self.posterior = MultiGaussianLSTM(input_size=g_dim, output_size=z_dim, hidden_size=rnn_size, num_layers=1)
 
         self.decoder = ModularDecoder(first_block_shape=first_block_shape, input_size=g_dim, stage_sizes=stage_sizes, num_base_filters=num_base_filters, skip_type=skip_type)
+        if depth_head:
+            assert FLAGS.pretrained_depth_objective, 'Only pretrained depth objective available right now'
+            from midas.dpt_depth import DPTDepthModel
+            from midas.midas_net import MidasNet
+            from midas.midas_net_custom import MidasNet_small
+            model = 'mns'
+            if model == 'dpt':
+                depth_model = DPTDepthModel(
+                    path='/viscam/u/stian/perceptual-metrics/MiDaS/weights/dpt_hybrid-midas-501f0c75.pt',
+                    backbone="vitb_rn50_384",
+                    non_negative=True,
+                )
+            elif model == 'mn':
+                depth_model = MidasNet('/viscam/u/stian/perceptual-metrics/MiDaS/weights/midas_v21-f6b98070.pt', non_negative=True)
+            elif model == 'mns':
+                depth_model = MidasNet_small('/viscam/u/stian/perceptual-metrics/MiDaS/weights/midas_v21_small-70d6b9c8.pt', features=64, backbone="efficientnet_lite3", exportable=True,
+                                        non_negative=True, blocks={'expand': True})
+            # Setting the memory format to channels last saves around 600MB VRAM but costs computation time
+            #depth_model = depth_model.to(memory_format=torch.channels_last)
+            depth_model = depth_model.half()
+            self.depth_head = depth_model
+
+            net_w, net_h = 384, 384
+            self.register_buffer('depth_head_mean', torch.Tensor([0.485, 0.456, 0.406])[..., None, None])
+            self.register_buffer('depth_head_std', torch.Tensor([0.229, 0.224, 0.225])[..., None, None])
+
         input_size = self.get_input_size(g_dim, action_size, z_dim)
         self.frame_predictor = MultiGaussianLSTM(input_size=input_size, output_size=g_dim, hidden_size=rnn_size, num_layers=2)
+    
+    def predict_depth(self, pred_frame, time_axis=True):
+        if time_axis:
+            shape = pred_frame.shape
+            pred_frame = pred_frame.view(
+                (shape[0] * shape[1],) + shape[2:])  # collapse batch*time dims [b0t0, b0t1, b0t2... b1t0, b1t1, b1t2...]
+        pred_frame = (pred_frame - self.depth_head_mean) / self.depth_head_std # normalize as done for pretrained MiDaS
+        #pred_frame = resize(pred_frame, scale_factors=6) # resize to 384x384
+
+        pred_frame = pred_frame
+        pred_frame = torch.nn.Upsample(scale_factor=4)(pred_frame)
+        #pred_frame = pred_frame.to(memory_format=torch.channels_last).half()
+        pred_frame = pred_frame.half()
+        #dummy_var = torch.zeros(([44, 3, 256, 256])).cuda()
+        depth_pred = self.depth_head(pred_frame)[:, None].float()
+        # normalize to [0, 1]
+        #range = depth_pred.amax(dim=(1, 2, 3), keepdim=True) - depth_pred.amin(dim=(1, 2, 3), keepdim=True)
+        #depth_pred = (depth_pred - depth_pred.amin(dim=(1, 2, 3), keepdim=True)) / range
+        depth_pred = torch.nn.functional.interpolate(depth_pred, size=(64, 64))
+        if time_axis:
+            return depth_pred.view((shape[0], shape[1],) + tuple(depth_pred.shape[1:]))
+        else:
+            return depth_pred
 
     def get_input(self, hidden, action, z):
         inp = [hidden]
@@ -323,18 +380,17 @@ class FitVid(nn.Module):
                      + torch.square(mean1 - mean2) * torch.exp(-logvar2))
         return torch.sum(kld) / batch_size
 
-    def forward(self, video, actions):
+    def forward(self, video, actions, depth=None):
         batch_size, video_len = video.shape[0], video.shape[1]
         video = video.view((batch_size*video_len,) + video.shape[2:]) # collapse first two dims
         hidden, skips = self.encoder(video)
         hidden = hidden.view((batch_size, video_len) + hidden.shape[1:])
         video = video.view((batch_size, video_len,) + video.shape[1:])  # reconstruct first two dims
         skips = {k: skips[k].view((batch_size, video_len,) + tuple(skips[k].shape[1:]))[:, self.n_past - 1] for k in skips.keys()}
-        loss, preds, metrics = self.calc_loss_helper(video, actions, hidden, skips, self.posterior, self.prior, self.frame_predictor)
-
+        loss, preds, metrics = self.calc_loss_helper(video, actions, hidden, skips, self.posterior, self.prior, self.frame_predictor, depth=depth)
         return loss, preds, metrics
 
-    def calc_loss_helper(self, video, actions, hidden, skips, posterior, prior, frame_predictor):
+    def calc_loss_helper(self, video, actions, hidden, skips, posterior, prior, frame_predictor, depth=None):
         if self.is_inference:
             assert False
         #video, actions = batch['video'], batch['actions']
@@ -364,6 +420,11 @@ class FitVid(nn.Module):
         mse = F.mse_loss(preds, video[:, 1:])
         loss = mse + kld * self.beta
 
+        if self.depth_head:
+            depth_preds = self.predict_depth(preds)
+            depth_mse = F.mse_loss(self.normalize(depth_preds, across_dims=2), self.normalize(depth[:, 1:], across_dims=2))
+            loss = loss + self.depth_weight * depth_mse
+
         # Metrics
         metrics = {
             'hist/mean': means,
@@ -372,6 +433,12 @@ class FitVid(nn.Module):
             'loss/kld': kld,
             'loss/all': loss,
         }
+
+        if self.depth_head:
+            metrics.update({
+                'loss/depth_mse': depth_mse
+            })
+
         return loss, preds, metrics
 
     def evaluate(self, batch):
@@ -406,6 +473,12 @@ class FitVid(nn.Module):
         video = video.view((batch_size, video_len,) + video.shape[1:])  # reconstuct first two dims
         mse = F.mse_loss(preds, video[:, 1:])
         return mse, preds
+
+    def normalize(self, t, across_dims=1):
+        dims = tuple(range(len(t.shape))[across_dims:])
+        t = t - t.amin(dim=dims, keepdim=True)
+        t = t / t.amax(dim=dims, keepdim=True)
+        return t
 
     def batch_inference(self, video, detach):
         batch_size, video_len = video.shape[0], video.shape[1]
@@ -446,6 +519,20 @@ def dict_to_cuda(d):
     return {k: v.cuda() for k, v in d.items()}
 
 
+def get_most_recent_checkpoint(dir):
+    if os.path.isdir(dir):
+        pass
+    else:
+        os.mkdir(dir)
+    existing_checkpoints = glob.glob(os.path.join(dir, 'model_epoch*'))
+    if existing_checkpoints:
+        checkpoint_nums = [int(s.split('/')[-1][len('model_epoch'):]) for s in existing_checkpoints]
+        best_ind = checkpoint_nums.index(max(checkpoint_nums))
+        return existing_checkpoints[best_ind]
+    else:
+        return None
+
+
 def main(argv):
     import random
     random.seed(0)
@@ -464,16 +551,23 @@ def main(argv):
                    action_conditioned=eval(FLAGS.action_conditioned),
                    action_size=4, # hardcode for now
                    is_inference=False,
+                   depth_head=FLAGS.depth_objective,
                    )
     NGPU = torch.cuda.device_count()
     print('CUDA available devices: ', NGPU)
+
+    checkpoint = get_most_recent_checkpoint(FLAGS.output_dir)
+    print(f'Attempting to load from checkpoint {checkpoint if checkpoint else "None, no model found"}')
+    if checkpoint:
+        model.load_parameters(checkpoint)
+
     model = torch.nn.DataParallel(model)
     model.to('cuda:0')
 
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
-    data_loader, prep_data = load_data(FLAGS.dataset_file, data_type='train')
-    test_data_loader, prep_data_test = load_data(FLAGS.dataset_file, data_type='valid')
+    data_loader, prep_data = load_data(FLAGS.dataset_file, data_type='train', depth=FLAGS.depth_objective)
+    test_data_loader, prep_data_test = load_data(FLAGS.dataset_file, data_type='valid', depth=FLAGS.depth_objective)
 
     train_losses = []
     train_mse = []
@@ -518,8 +612,11 @@ def main(argv):
             batch_idx, batch = iter_item
             batch = dict_to_cuda(prep_data(batch))
             #batch = prep_data(batch)
-            video, actions = batch['video'], batch['actions']
-            loss, preds, metrics = model(video, actions)
+            if FLAGS.depth_objective:
+                inputs = batch['video'], batch['actions'], batch['depth_video']
+            else:
+                inputs = batch['video'], batch['actions']
+            loss, preds, metrics = model(*inputs)
             if NGPU > 1:
                 loss = loss.mean()
                 metrics = {k: v.mean() for k, v in metrics.items()}
