@@ -232,7 +232,7 @@ class ModularEncoder(nn.Module):
 
 
 class ModularDecoder(nn.Module):
-    def __init__(self, first_block_shape, input_size, stage_sizes, num_base_filters, skip_type):
+    def __init__(self, first_block_shape, input_size, stage_sizes, num_base_filters, skip_type, expand):
         super(ModularDecoder, self).__init__()
         self.skip_type = skip_type
         self.stage_sizes = stage_sizes
@@ -249,7 +249,7 @@ class ModularDecoder(nn.Module):
             for j in range(block_size):
                 num_filters = num_base_filters * 2 ** (len(stage_sizes) - i - 1)
                 upsample = True if i > 0 and j == 0 else False
-                block = DecoderBlock(in_channels=prev_num_filters, out_channels=num_filters, expand=FLAGS.expand, upsample=upsample)
+                block = DecoderBlock(in_channels=prev_num_filters, out_channels=num_filters, expand=expand, upsample=upsample)
                 setattr(self, f'DecoderBlock_{count}', block)
                 blocks.append(block)
                 count += 1
@@ -293,32 +293,36 @@ class ModularDecoder(nn.Module):
 class FitVid(nn.Module):
     """FitVid video predictor."""
 
-    def __init__(self, stage_sizes, z_dim, g_dim, rnn_size, num_base_filters, first_block_shape, skip_type, n_past, action_conditioned, action_size, is_inference, has_depth_predictor):
+    def __init__(self, stage_sizes, z_dim, g_dim, rnn_size, num_base_filters, first_block_shape, expand_decoder,
+                 skip_type, n_past, action_conditioned, action_size, is_inference, has_depth_predictor, beta, depth_weight):
         super(FitVid, self).__init__()
         self.n_past = n_past
         self.action_conditioned = action_conditioned
-        self.beta = FLAGS.beta
+        self.beta = beta
         self.stochastic = True
         self.is_inference = is_inference
         self.skip_type = skip_type
         self.has_depth_predictor = has_depth_predictor
-        self.depth_weight = FLAGS.depth_weight
+        self.depth_weight = depth_weight
 
-        if FLAGS.depth_loss == 'norm_mse':
-            self.depth_loss = self.depth_mse_loss
-        elif FLAGS.depth_loss == 'eigen':
-            self.depth_loss = self.eigen_depth_loss
-        else:
-            raise NotImplementedError
+        if not is_inference:
+            if FLAGS.depth_loss == 'norm_mse':
+                self.depth_loss = self.depth_mse_loss
+            elif FLAGS.depth_loss == 'eigen':
+                self.depth_loss = self.eigen_depth_loss
+            else:
+                raise NotImplementedError
 
         first_block_shape = [first_block_shape[-1]] + first_block_shape[:2]
         self.encoder = ModularEncoder(stage_sizes=stage_sizes, output_size=g_dim, num_base_filters=num_base_filters)
         self.prior = MultiGaussianLSTM(input_size=g_dim, output_size=z_dim, hidden_size=rnn_size, num_layers=1)
         self.posterior = MultiGaussianLSTM(input_size=g_dim, output_size=z_dim, hidden_size=rnn_size, num_layers=1)
 
-        self.decoder = ModularDecoder(first_block_shape=first_block_shape, input_size=g_dim, stage_sizes=stage_sizes, num_base_filters=num_base_filters, skip_type=skip_type)
+        self.decoder = ModularDecoder(first_block_shape=first_block_shape, input_size=g_dim, stage_sizes=stage_sizes,
+                                      num_base_filters=num_base_filters, skip_type=skip_type, expand=expand_decoder)
+
         if has_depth_predictor:
-            assert FLAGS.pretrained_depth_objective, 'Only pretrained depth objective available right now'
+            #assert FLAGS.pretrained_depth_objective, 'Only pretrained depth objective available right now'
             from midas.dpt_depth import DPTDepthModel
             from midas.midas_net import MidasNet
             from midas.midas_net_custom import MidasNet_small
@@ -492,7 +496,7 @@ class FitVid(nn.Module):
             h_pred = torch.sigmoid(h_pred) # TODO notice
 
             pred = self.decoder(h_pred[None, :], skips)[0]
-            if self.has_depth_predictor:
+            if self.has_depth_predictor and 'depth' in batch:
                 depth_pred = self.predict_depth(pred, time_axis=False)
                 depth_preds.append(depth_pred)
             preds.append(pred)
@@ -510,6 +514,35 @@ class FitVid(nn.Module):
             preds = (preds, depth_preds)
 
         return mse, preds
+
+    def test(self, batch):
+        """Predict the full video conditioned on the first self.n_past frames. """
+        video, actions = batch['video'], batch['actions']
+        batch_size, video_len = video.shape[0], video.shape[1]
+        action_len = actions.shape[1]
+        pred_state = prior_state = None
+        video = video.view((batch_size * video_len,) + video.shape[2:])  # collapse first two dims
+        hidden, skips = self.encoder(video)
+        skips = {k: skips[k].view((batch_size, video_len,) + tuple(skips[k].shape[1:]))[:, self.n_past - 1] for k in skips.keys()}
+        # evaluating
+        preds = []
+        depth_preds = []
+        masks = []
+        hidden = hidden.view((batch_size, video_len) + hidden.shape[1:])
+        for i in range(1, action_len+1):
+            if i <= self.n_past:
+                h = hidden[:, i-1]
+            if i > self.n_past:
+                h, _ = self.encoder(pred)
+            (z_t, prior_mu, prior_logvar), prior_state = self.prior(h, prior_state)
+            inp = self.get_input(h, actions[:, i - 1], z_t)
+            (_, h_pred, _), pred_state = self.frame_predictor(inp, pred_state)
+            h_pred = torch.sigmoid(h_pred) # TODO notice
+            pred = self.decoder(h_pred[None, :], skips)[0]
+            preds.append(pred)
+        preds = torch.stack(preds, axis=1)
+        video = video.view((batch_size, video_len,) + video.shape[1:])  # reconstuct first two dims
+        return preds
 
     def normalize(self, t, across_dims=1):
         dims = tuple(range(len(t.shape))[across_dims:])
@@ -589,6 +622,9 @@ def main(argv):
                    action_size=4, # hardcode for now
                    is_inference=False,
                    has_depth_predictor=FLAGS.depth_objective,
+                   expand_decoder=FLAGS.expand,
+                   beta=FLAGS.beta,
+                   depth_weight=FLAGS.depth_weight
                    )
     NGPU = torch.cuda.device_count()
     print('CUDA available devices: ', NGPU)
