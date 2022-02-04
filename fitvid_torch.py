@@ -12,6 +12,7 @@ import glob
 from copy import deepcopy
 from tqdm import tqdm
 import moviepy
+import wandb
 
 from fitvid import robomimic_data
 from fitvid.resize_right.resize_right import resize
@@ -41,6 +42,7 @@ flags.DEFINE_string('skip_type', 'residual', 'skip type: residual, concat, no_sk
 # Model saving
 flags.DEFINE_string('output_dir', None, 'Path to model checkpoints/summaries.')
 flags.DEFINE_integer('save_freq', 10, 'number of steps between checkpoints')
+flags.DEFINE_boolean('wandb_online', None, 'Use wandb online mode (probably should disable on cluster)')
 
 # Data
 flags.DEFINE_spaceseplist('dataset_file', [], 'Dataset to load.')
@@ -496,7 +498,7 @@ class FitVid(nn.Module):
             h_pred = torch.sigmoid(h_pred) # TODO notice
 
             pred = self.decoder(h_pred[None, :], skips)[0]
-            if self.has_depth_predictor and 'depth' in batch:
+            if self.has_depth_predictor and 'depth_video' in batch:
                 depth_pred = self.predict_depth(pred, time_axis=False)
                 depth_preds.append(depth_pred)
             preds.append(pred)
@@ -506,7 +508,7 @@ class FitVid(nn.Module):
         video = video.view((batch_size, video_len,) + video.shape[1:])  # reconstuct first two dims
         mse = F.mse_loss(preds, video[:, 1:])
 
-        if self.has_depth_predictor:
+        if self.has_depth_predictor and 'depth_video' in batch:
             depth_preds = torch.stack(depth_preds, axis=1)
             depth_video = batch['depth_video']
             depth_loss = self.depth_loss(depth_preds, depth_video[:, 1:])
@@ -598,9 +600,9 @@ def get_most_recent_checkpoint(dir):
     if existing_checkpoints:
         checkpoint_nums = [int(s.split('/')[-1][len('model_epoch'):]) for s in existing_checkpoints]
         best_ind = checkpoint_nums.index(max(checkpoint_nums))
-        return existing_checkpoints[best_ind]
+        return existing_checkpoints[best_ind], max(checkpoint_nums)
     else:
-        return None
+        return None, -1
 
 
 def main(argv):
@@ -629,7 +631,7 @@ def main(argv):
     NGPU = torch.cuda.device_count()
     print('CUDA available devices: ', NGPU)
 
-    checkpoint = get_most_recent_checkpoint(FLAGS.output_dir)
+    checkpoint, resume_epoch = get_most_recent_checkpoint(FLAGS.output_dir)
     print(f'Attempting to load from checkpoint {checkpoint if checkpoint else "None, no model found"}')
     if checkpoint:
         model.load_parameters(checkpoint)
@@ -642,6 +644,20 @@ def main(argv):
     data_loader, prep_data = load_data(FLAGS.dataset_file, data_type='train', depth=FLAGS.depth_objective)
     test_data_loader, prep_data_test = load_data(FLAGS.dataset_file, data_type='valid', depth=FLAGS.depth_objective)
 
+    wandb.init(
+        project='perceptual-metrics',
+        reinit=True,
+        resume=True,
+        mode='online' if FLAGS.wandb_online else 'offline'
+    )
+
+    if FLAGS.output_dir is not None:
+        wandb.run.name = f"{FLAGS.output_dir.split('/')[-1]}"
+        wandb.run.save()
+
+    wandb.config.update(FLAGS)
+    wandb.config.slurm_job_id = os.getenv('SLURM_JOB_ID', 0)
+
     train_losses = []
     train_mse = []
     test_mse = []
@@ -650,7 +666,7 @@ def main(argv):
     train_steps = 0
     num_batch_to_save = 1
 
-    for epoch in range(num_epochs):
+    for epoch in range(resume_epoch+1, num_epochs):
         predicting_depth = FLAGS.depth_objective and epoch > FLAGS.depth_start_epoch
 
         print(f'\nEpoch {epoch} / {num_epochs}')
@@ -662,14 +678,17 @@ def main(argv):
         print('Evaluating')
         model.eval()
         with torch.no_grad():
+            wandb_log = {}
             epoch_mse = []
             epoch_depth_mse = []
             for iter_item in enumerate(tqdm(test_data_loader)):
                 test_batch_idx, batch = iter_item
                 batch = dict_to_cuda(prep_data_test(batch))
                 test_videos = batch['video']
+                if not predicting_depth and 'depth_video' in batch:
+                    batch.pop('depth_video')
                 mse, eval_preds = model.module.evaluate(batch)
-                if FLAGS.depth_objective:
+                if predicting_depth:
                     mse, depth_mse = mse
                     eval_preds, eval_depth_preds = eval_preds
                     if test_batch_idx < num_batch_to_save:
@@ -683,9 +702,12 @@ def main(argv):
                 if FLAGS.debug and test_batch_idx > 5:
                     break
             test_mse.append(np.mean(epoch_mse))
-            if FLAGS.depth_objective:
+            wandb_log.update({'eval/mse': mse})
+            if predicting_depth:
                 test_depth_mse.append(np.mean(epoch_depth_mse))
+                wandb_log.update({'eval/depth_mse': np.mean(epoch_depth_mse)})
                 print(f'Test Depth MSE: {test_depth_mse[-1]}')
+            wandb.log(wandb_log)
         print(f'Test MSE: {test_mse[-1]}')
 
         if test_mse[-1] == np.min(test_mse):
@@ -702,6 +724,8 @@ def main(argv):
         optimizer.zero_grad()
 
         for iter_item in enumerate(tqdm(data_loader)):
+            wandb_log = {}
+
             batch_idx, batch = iter_item
             batch = dict_to_cuda(prep_data(batch))
             #batch = prep_data(batch)
@@ -733,6 +757,9 @@ def main(argv):
                 if predicting_depth:
                     save_depth_vids = torch.cat([batch['depth_video'][:4, 1:], depth_preds[:4]], dim=-1).detach().cpu().numpy()
                     [train_save_depth_videos.append(vid) for vid in save_depth_vids]
+
+            wandb_log.update({f'train/{k}': v for k, v in metrics.items()})
+            wandb.log(wandb_log)
             if FLAGS.debug and batch_idx > 5:
                 break
         if epoch % FLAGS.save_freq == 0:
@@ -747,27 +774,30 @@ def main(argv):
             print('Skip saving models')
 
         # plot the train/test curve so far
-        plt.figure()
-        x_train = np.linspace(0, epoch+1, len(train_mse))
-        plt.plot(x_train, train_mse, 'b', marker='x', label='train_mse')
-        plt.plot(np.arange(epoch+1), test_mse, 'r', marker='x', label='test_mse')
-        plt.xlabel('Epoch')
-        plt.ylabel('MSE')
-        plt.legend()
-        plt.savefig(os.path.join(FLAGS.output_dir, 'losses.png'))
-        plt.close()
-        print('Saved loss curve')
+        # plt.figure()
+        # x_train = np.linspace(0, epoch+1, len(train_mse))
+        # plt.plot(x_train, train_mse, 'b', marker='x', label='train_mse')
+        # plt.plot(np.arange(epoch+1), test_mse, 'r', marker='x', label='test_mse')
+        # plt.xlabel('Epoch')
+        # plt.ylabel('MSE')
+        # plt.legend()
+        # plt.savefig(os.path.join(FLAGS.output_dir, 'losses.png'))
+        # plt.close()
+        # print('Saved loss curve')
 
         if epoch % 1 == 0:
+            wandb_log = dict()
             for i, vid in enumerate(test_save_videos):
                 vid = np.moveaxis(vid, 1, 3)
                 vid = np.array(vid * 255)
+                wandb_log.update({f'video_test_{i}': wandb.Video(np.moveaxis(vid, 3, 1), fps=4, format='gif')})
                 save_moviepy_gif(list(vid), os.path.join(FLAGS.output_dir, f'video_test_epoch{epoch}_{i}'), fps=5)
                 print('Saved test vid for the epoch')
 
             for i, vid in enumerate(train_save_videos):
                 vid = np.moveaxis(vid, 1, 3)
                 vid = np.array(vid * 255)
+                wandb_log.update({f'video_train_{i}': wandb.Video(np.moveaxis(vid, 3, 1), fps=4, format='gif')})
                 save_moviepy_gif(list(vid), os.path.join(FLAGS.output_dir, f'video_train_epoch{epoch}_{i}'), fps=5)
                 print('Saved train vid for each epoch')
 
@@ -787,14 +817,17 @@ def main(argv):
             for i, vid in enumerate(test_save_depth_videos):
                 vids = np.split(vid, 2, axis=-1)
                 vid = np.concatenate([depth_to_rgb_im(v, colormap) for v in vids], axis=-2)
+                wandb_log.update({f'video_depth_test_{i}': wandb.Video(np.moveaxis(vid, 3, 1), fps=4, format='gif')})
                 save_moviepy_gif(list(vid), os.path.join(FLAGS.output_dir, f'video_depth_test_epoch{epoch}_{i}'), fps=5)
                 print('Saved test depth vid for the epoch')
 
             for i, vid in enumerate(train_save_depth_videos):
                 vids = np.split(vid, 2, axis=-1)
                 vid = np.concatenate([depth_to_rgb_im(v, colormap) for v in vids], axis=-2)
+                wandb_log.update({f'video_depth_train_{i}': wandb.Video(np.moveaxis(vid, 3, 1), fps=4, format='gif')})
                 save_moviepy_gif(list(vid), os.path.join(FLAGS.output_dir, f'video_depth_train_epoch{epoch}_{i}'), fps=5)
                 print('Saved train depth vid for the epoch')
+            wandb.log(wandb_log)
 
 
 def save_moviepy_gif(obs_list, name, fps=5):
