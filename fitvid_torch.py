@@ -605,6 +605,17 @@ def get_most_recent_checkpoint(dir):
         return None, -1
 
 
+def depth_to_rgb_im(im, cmap):
+    # shape = [(T), 1, W, H]
+    # normalize
+    axes = tuple(range(len(im.shape)))[-3:]
+    im = im - np.amin(im, axis=axes, keepdims=True)
+    im = im / np.amax(im, axis=axes, keepdims=True)
+    im = np.squeeze(im)
+    # convert to rgb using given cmap
+    im = cmap(im)[..., :3]
+    return im * 255
+
 def main(argv):
     import random
     random.seed(0)
@@ -647,7 +658,7 @@ def main(argv):
     wandb.init(
         project='perceptual-metrics',
         reinit=True,
-        resume=True,
+        #resume=True,
         mode='online' if FLAGS.wandb_online else 'offline'
     )
 
@@ -800,16 +811,6 @@ def main(argv):
                 wandb_log.update({f'video_train_{i}': wandb.Video(np.moveaxis(vid, 3, 1), fps=4, format='gif')})
                 save_moviepy_gif(list(vid), os.path.join(FLAGS.output_dir, f'video_train_epoch{epoch}_{i}'), fps=5)
                 print('Saved train vid for each epoch')
-
-            def depth_to_rgb_im(im, cmap):
-                # shape = [(T), 1, W, H]
-                # normalize
-                axes = tuple(range(len(im.shape)))[-3:]
-                im = im - np.amin(im, axis=axes, keepdims=True)
-                im = im / np.amax(im, axis=axes, keepdims=True)
-                im = np.squeeze(im)
-                im = cmap(im)[..., :3]
-                return im * 255
 
             cmap_name = 'jet_r' #or 'inferno'?
             colormap = plt.get_cmap(cmap_name)
