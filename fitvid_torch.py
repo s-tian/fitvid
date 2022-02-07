@@ -27,6 +27,7 @@ flags.DEFINE_integer('n_future', 10, 'Number of future frames.') # not used, inf
 flags.DEFINE_integer('num_epochs', 1000, 'Number of steps to train for.')
 flags.DEFINE_float('beta', 1e-4, 'Weight on KL.')
 flags.DEFINE_string('data_in_gpu', 'True', 'whether to put data in GPU, or RAM')
+flags.DEFINE_string('loss', 'l2', 'whether to use l2 or l1 loss')
 
 # Model architecture
 flags.DEFINE_integer('z_dim', 10, 'LSTM output size.') #
@@ -37,6 +38,7 @@ flags.DEFINE_list('first_block_shape', [8, 8, 512], 'Decoder first conv size') #
 flags.DEFINE_string('action_conditioned', 'True', 'Action conditioning.')
 flags.DEFINE_integer('num_base_filters', 32, 'num_filters = num_base_filters * 2^layer_index.') # 64
 flags.DEFINE_integer('expand', 1, 'multiplier on decoder\'s num_filters.') # 4
+flags.DEFINE_integer('action_size', 4, 'number of actions') # 4
 flags.DEFINE_string('skip_type', 'residual', 'skip type: residual, concat, no_skip, pixel_residual') # residual
 
 # Model saving
@@ -46,6 +48,7 @@ flags.DEFINE_boolean('wandb_online', None, 'Use wandb online mode (probably shou
 
 # Data
 flags.DEFINE_spaceseplist('dataset_file', [], 'Dataset to load.')
+flags.DEFINE_boolean('hdf5_data', None, 'using hdf5 data')
 
 # depth objective
 flags.DEFINE_boolean('depth_objective', False, 'Use depth image decoding as a auxiliary objective.')
@@ -296,7 +299,8 @@ class FitVid(nn.Module):
     """FitVid video predictor."""
 
     def __init__(self, stage_sizes, z_dim, g_dim, rnn_size, num_base_filters, first_block_shape, expand_decoder,
-                 skip_type, n_past, action_conditioned, action_size, is_inference, has_depth_predictor, beta, depth_weight):
+                 skip_type, n_past, action_conditioned, action_size, is_inference, has_depth_predictor, beta, depth_weight,
+                 loss_fn):
         super(FitVid, self).__init__()
         self.n_past = n_past
         self.action_conditioned = action_conditioned
@@ -306,6 +310,7 @@ class FitVid(nn.Module):
         self.skip_type = skip_type
         self.has_depth_predictor = has_depth_predictor
         self.depth_weight = depth_weight
+        self.loss_fn = loss_fn
 
         if not is_inference:
             if FLAGS.depth_loss == 'norm_mse':
@@ -430,8 +435,7 @@ class FitVid(nn.Module):
 
         means = torch.stack(means, axis=1)
         logvars = torch.stack(logvars, axis=1)
-
-        mse = F.mse_loss(preds, video[:, 1:])
+        mse = self.loss_fn(preds, video[:, 1:])
         loss = mse + kld * self.beta
 
         if self.has_depth_predictor and depth is not None:
@@ -506,7 +510,7 @@ class FitVid(nn.Module):
         preds = torch.stack(preds, axis=1)
 
         video = video.view((batch_size, video_len,) + video.shape[1:])  # reconstuct first two dims
-        mse = F.mse_loss(preds, video[:, 1:])
+        mse = self.loss_fn(preds, video[:, 1:])
 
         if self.has_depth_predictor and 'depth_video' in batch:
             depth_preds = torch.stack(depth_preds, axis=1)
@@ -623,6 +627,13 @@ def main(argv):
     np.random.seed(0)
     os.environ['PYTHONHASHSEED'] = str(0)
 
+    if FLAGS.loss=='l2':
+        loss_fn = F.mse_loss
+    elif FLAGS.loss == 'l1':
+        loss_fn = F.l1_loss
+    else:
+        raise NotImplementedError
+
     model = FitVid(stage_sizes=[int(i) for i in FLAGS.stage_sizes],
                    z_dim=FLAGS.z_dim,
                    g_dim=FLAGS.g_dim,
@@ -632,12 +643,13 @@ def main(argv):
                    skip_type=FLAGS.skip_type,
                    n_past=FLAGS.n_past,
                    action_conditioned=eval(FLAGS.action_conditioned),
-                   action_size=4, # hardcode for now
+                   action_size=FLAGS.action_size, # hardcode for now
                    is_inference=False,
                    has_depth_predictor=FLAGS.depth_objective,
                    expand_decoder=FLAGS.expand,
                    beta=FLAGS.beta,
-                   depth_weight=FLAGS.depth_weight
+                   depth_weight=FLAGS.depth_weight,
+                   loss_fn=loss_fn,
                    )
     NGPU = torch.cuda.device_count()
     print('CUDA available devices: ', NGPU)
@@ -652,8 +664,14 @@ def main(argv):
 
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
-    data_loader, prep_data = load_data(FLAGS.dataset_file, data_type='train', depth=FLAGS.depth_objective)
-    test_data_loader, prep_data_test = load_data(FLAGS.dataset_file, data_type='valid', depth=FLAGS.depth_objective)
+    if FLAGS.hdf5_data:
+        from fitvid.hdf5_data_loader import load_hdf5_data
+        data_loader = load_hdf5_data(FLAGS.dataset_file, FLAGS.batch_size, data_type='train')
+        test_data_loader = load_hdf5_data(FLAGS.dataset_file, FLAGS.batch_size, data_type='val')
+        prep_data = prep_data_test = lambda x: x
+    else:
+        data_loader, prep_data = load_data(FLAGS.dataset_file, data_type='train', depth=FLAGS.depth_objective)
+        test_data_loader, prep_data_test = load_data(FLAGS.dataset_file, data_type='valid', depth=FLAGS.depth_objective)
 
     wandb.init(
         project='perceptual-metrics',
@@ -752,7 +770,8 @@ def main(argv):
             if NGPU > 1:
                 loss = loss.mean()
                 metrics = {k: v.mean() for k, v in metrics.items()}
-            print(loss)
+
+            #print(loss)
             loss.backward()
 
             optimizer.step()
