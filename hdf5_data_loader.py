@@ -8,7 +8,7 @@ import random
 import pdb
 import matplotlib.pyplot as plt
 import imageio
-from torchvision.transforms import Resize
+from torchvision.transforms import Resize, RandomResizedCrop
 import imp
 from torch.utils.data import DataLoader
 import os
@@ -100,11 +100,13 @@ class FixLenVideoDataset(BaseVideoDataset):
             self.T = data_conf.T
         else: self.T = self.get_total_seqlen(self.filenames[0])
 
-        self.transform = Resize([data_conf.img_sz[0], data_conf.img_sz[1]])
         self.flatten_im = False
         self.filter_repeated_tail = False
 
         self.cached_data = dict()
+
+        # data augmentation
+        self.transform = RandomResizedCrop((self.img_sz[0], self.img_sz[1]), scale=(0.8, 1.0), ratio=(1., 1.))
 
         print(phase)
         print(len(self.filenames))
@@ -145,9 +147,13 @@ class FixLenVideoDataset(BaseVideoDataset):
 
         segment = self.sample_rand_shifts(self.cached_data[path])
         return {
-            'video': segment.demo_seq_images,
+            'video': self.apply_image_aug(segment.demo_seq_images),
             'actions': segment.actions
         }
+
+    def apply_image_aug(self, x):
+        x = torch.Tensor(x)
+        return self.transform(x).numpy()
 
     def process_data_dict(self, data_dict):
         data_dict.demo_seq_images = self.preprocess_images(data_dict['images'])
