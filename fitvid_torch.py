@@ -46,6 +46,7 @@ flags.DEFINE_boolean('wandb_online', None, 'Use wandb online mode (probably shou
 
 # Data
 flags.DEFINE_spaceseplist('dataset_file', [], 'Dataset to load.')
+flags.DEFINE_string('camera_view', 'agentview', 'Camera view of data to load. Default is "agentview".')
 
 # depth objective
 flags.DEFINE_boolean('depth_objective', False, 'Use depth image decoding as a auxiliary objective.')
@@ -381,11 +382,12 @@ class FitVid(nn.Module):
         depth_pred = self.depth_head(pred_frame)[:, None].float()
         # normalize to [0, 1]
         depth_pred = torch.nn.functional.interpolate(depth_pred, size=(64, 64))
-        depth_pred = 1 - normalize_depth(depth_pred, across_dims=1)
         if time_axis:
-            return depth_pred.view((shape[0], shape[1],) + tuple(depth_pred.shape[1:]))
+            depth_pred = depth_pred.view((shape[0], shape[1],) + tuple(depth_pred.shape[1:]))
         else:
-            return depth_pred
+            depth_pred = depth_pred
+        depth_pred = 1 - normalize_depth(depth_pred, across_dims=1)
+        return depth_pred
 
     def get_input(self, hidden, action, z):
         inp = [hidden]
@@ -469,8 +471,6 @@ class FitVid(nn.Module):
         if self.has_depth_predictor and depth is not None:
             preds = (preds, depth_preds)
         return loss, preds, metrics
-
-
 
     def eigen_depth_loss(self, pred, gt, lambd=0, video=True,):
         # Scale-invariant error from Eigen et.al, 2014.
@@ -590,7 +590,7 @@ class FitVid(nn.Module):
 
 def load_data(dataset_files, data_type='train', depth=False):
     video_len = FLAGS.n_past + FLAGS.n_future
-    return robomimic_data.load_dataset_robomimic_torch(dataset_files, FLAGS.batch_size, video_len, data_type, depth)
+    return robomimic_data.load_dataset_robomimic_torch(dataset_files, FLAGS.batch_size, video_len, data_type, depth, view=FLAGS.camera_view)
 
 
 def dict_to_cuda(d):
@@ -609,7 +609,6 @@ def get_most_recent_checkpoint(dir):
         return existing_checkpoints[best_ind], max(checkpoint_nums)
     else:
         return None, -1
-
 
 
 def main(argv):
@@ -635,6 +634,7 @@ def main(argv):
                    beta=FLAGS.beta,
                    depth_weight=FLAGS.depth_weight,
                    pretrained_depth_path=FLAGS.depth_model_path,
+                   freeze_depth_model=FLAGS.freeze_pretrained,
                    )
     NGPU = torch.cuda.device_count()
     print('CUDA available devices: ', NGPU)

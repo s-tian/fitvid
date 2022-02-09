@@ -8,10 +8,10 @@ DEFAULT_WEIGHT_LOCATIONS = {
     'mns': '/viscam/u/stian/perceptual-metrics/MiDaS/weights/midas_v21_small-70d6b9c8.pt'
 }
 
+
 def normalize_depth(t, across_dims=1):
     # Normalize depth values across all but the first dimension.
     # A 4-D input will be normalized per frame, but a 5-D input will be normalized per sequence.
-
     dims = tuple(range(len(t.shape))[across_dims:])
     t = t - t.amin(dim=dims, keepdim=True)
     t = t / (t.amax(dim=dims, keepdim=True) + 1e-10)

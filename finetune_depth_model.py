@@ -1,4 +1,5 @@
 import argparse
+import os
 import tqdm
 import torch
 import torch.nn.functional as F
@@ -31,9 +32,9 @@ def load_model(model_name, path):
     return depth_model
 
 
-def get_dataloaders(dataset_files, bs):
-    train_load = load_dataset_robomimic_torch(dataset_files, batch_size=bs, video_len=12, phase='train', depth=True)
-    val_load = load_dataset_robomimic_torch(dataset_files, batch_size=bs, video_len=12, phase='valid', depth=True)
+def get_dataloaders(dataset_files, bs, view):
+    train_load = load_dataset_robomimic_torch(dataset_files, batch_size=bs, video_len=12, phase='train', depth=True, view=view)
+    val_load = load_dataset_robomimic_torch(dataset_files, batch_size=bs, video_len=12, phase='valid', depth=True, view=view)
     return train_load, val_load
 
 
@@ -51,24 +52,24 @@ def loss_fn(pred, actual):
 
 
 def prep_batch(batch):
-    depth_images = flatten_dims(batch['depth_video'])
+    depth_images = batch['depth_video']
     images = flatten_dims(batch['video'])
     images = torch.nn.Upsample(scale_factor=4)(images)
     images = (images - torch.Tensor([0.485, 0.456, 0.406])[..., None, None].to(images.device)) / (torch.Tensor([0.229, 0.224, 0.225])[..., None, None].to(images.device))
     return images, depth_images
 
 
-def log_preds(preds, epoch, phase):
+def log_preds(folder, preds, epoch, phase):
     preds = preds.detach().cpu().numpy()
     for i, pred in enumerate(preds):
         depth_video = depth_to_rgb_im(pred)
-        save_moviepy_gif(list(depth_video), f'finetune_outputs/{phase}_epoch_{epoch}_pred_{i}')
+        save_moviepy_gif(list(depth_video), os.path.join(folder, f'{phase}_epoch_{epoch}_pred_{i}'))
 
 
 def main(args):
     model = load_model(args.model_type, args.checkpoint)
     model = model.cuda()
-    train_loader, val_loader = get_dataloaders(args.dataset_files, args.batch_size)
+    train_loader, val_loader = get_dataloaders(args.dataset_files, args.batch_size, args.view)
     train_loader, train_prep = train_loader
     val_loader, val_prep = val_loader
     print(len(train_loader))
@@ -82,10 +83,12 @@ def main(args):
         model.train()
         for i, batch in tqdm.tqdm(enumerate(train_loader)):
             batch = dict_to_cuda(train_prep(batch))
-            traj_length = batch['video'].shape[1]
+            shape = batch['video'].shape
+            traj_length = shape[1]
             images, depth_images = prep_batch(batch)
             preds = model(images)
             preds = torch.nn.functional.interpolate(preds[:, None], size=(64, 64))
+            preds = preds.reshape(-1, traj_length, *preds.shape[1:])
             preds = 1 - normalize_depth(preds)
             optimizer.zero_grad()
             loss = loss_fn(preds, depth_images)
@@ -95,8 +98,7 @@ def main(args):
                 print(f'Train loss: {loss}')
             if i > train_steps_per_epoch:
                 break
-        preds = preds.reshape(-1, traj_length, *preds.shape[1:])
-        log_preds(preds, epoch, 'train')
+        log_preds(os.path.dirname(args.output_file), preds, epoch, 'train')
         print(f'Epoch {epoch} training loss: {loss}')
         model.eval()
         print('Running validation...')
@@ -105,13 +107,13 @@ def main(args):
             images, depth_images = prep_batch(batch)
             preds = model(images)
             preds = torch.nn.functional.interpolate(preds[:, None], size=(64, 64))
+            preds = preds.reshape(-1, traj_length, *preds.shape[1:])
             preds = 1 - normalize_depth(preds)
             val_loss = loss_fn(preds, depth_images)
             if i > val_steps_per_epoch:
                 break
         print(f'Epoch {epoch} validation loss: {val_loss}')
-        preds = preds.reshape(-1, traj_length, *preds.shape[1:])
-        log_preds(preds, epoch, 'val')
+        log_preds(os.path.dirname(args.output_file), preds, epoch, 'val')
 
     torch.save(model.state_dict(), args.output_file)
 
@@ -121,6 +123,8 @@ if __name__ == '__main__':
         '--checkpoint', default='', help='Model checkpoint to load')
     parser.add_argument(
         '--output_file', default='', required=True, help='Where to save final model params')
+    parser.add_argument(
+        '--view', default='agentview', required=True, help='Camera view to use for training')
     parser.add_argument(
         '--dataset_files', nargs='+', required=True, help='number of trajectories to run for complete eval')
     parser.add_argument(

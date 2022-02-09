@@ -66,7 +66,7 @@ def get_data_loader(dataset_paths, batch_size, video_len, phase, depth, view):
 def load_dataset_robomimic_torch(dataset_path, batch_size, video_len, phase, depth, view='agentview'):
     assert phase in ['train', 'valid'], f'Phase is not one of the acceptable values! Got {phase}'
 
-    loader = get_data_loader(dataset_path, batch_size, video_len, phase, depth)
+    loader = get_data_loader(dataset_path, batch_size, video_len, phase, depth, view)
     def prepare_data(xs):
         data_dict = {
             'video': xs['obs'][f'{view}_image'],
