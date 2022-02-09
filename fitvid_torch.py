@@ -292,6 +292,13 @@ class ModularDecoder(nn.Module):
             return x # for VAE
 
 
+def normalize_depth(t, across_dims=1):
+    dims = tuple(range(len(t.shape))[across_dims:])
+    t = t - t.amin(dim=dims, keepdim=True)
+    t = t / (t.amax(dim=dims, keepdim=True) + 1e-10)
+    return t
+
+
 class FitVid(nn.Module):
     """FitVid video predictor."""
 
@@ -367,7 +374,7 @@ class FitVid(nn.Module):
         depth_pred = self.depth_head(pred_frame)[:, None].float()
         # normalize to [0, 1]
         depth_pred = torch.nn.functional.interpolate(depth_pred, size=(64, 64))
-        depth_pred = 1 - self.normalize(depth_pred, across_dims=1)
+        depth_pred = 1 - normalize_depth(depth_pred, across_dims=1)
         if time_axis:
             return depth_pred.view((shape[0], shape[1],) + tuple(depth_pred.shape[1:]))
         else:
@@ -458,7 +465,7 @@ class FitVid(nn.Module):
 
     def depth_mse_loss(self, pred, gt, video=True):
         dims = 2 if video else 1
-        return F.mse_loss(self.normalize(pred, across_dims=dims), self.normalize(gt, across_dims=dims))
+        return F.mse_loss(normalize_depth(pred, across_dims=dims), normalize_depth(gt, across_dims=dims))
 
     def eigen_depth_loss(self, pred, gt, lambd=0, video=True,):
         # Scale-invariant error from Eigen et.al, 2014.
@@ -546,11 +553,7 @@ class FitVid(nn.Module):
         video = video.view((batch_size, video_len,) + video.shape[1:])  # reconstuct first two dims
         return preds
 
-    def normalize(self, t, across_dims=1):
-        dims = tuple(range(len(t.shape))[across_dims:])
-        t = t - t.amin(dim=dims, keepdim=True)
-        t = t / (t.amax(dim=dims, keepdim=True) + 1e-10)
-        return t
+
 
     def batch_inference(self, video, detach):
         batch_size, video_len = video.shape[0], video.shape[1]
@@ -608,7 +611,7 @@ def get_most_recent_checkpoint(dir):
 def depth_to_rgb_im(im, cmap):
     # shape = [(T), 1, W, H]
     # normalize
-    axes = tuple(range(len(im.shape)))[-3:]
+    axes = tuple(range(len(im.shape)))[-4:]
     im = im - np.amin(im, axis=axes, keepdims=True)
     im = im / np.amax(im, axis=axes, keepdims=True)
     im = np.squeeze(im)
