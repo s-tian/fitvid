@@ -15,7 +15,7 @@ import moviepy
 import wandb
 
 from fitvid import robomimic_data
-from fitvid.resize_right.resize_right import resize
+from fitvid.depth_utils import normalize_depth, depth_to_rgb_im, depth_mse_loss, DEFAULT_WEIGHT_LOCATIONS
 
 FLAGS = flags.FLAGS
 
@@ -51,8 +51,9 @@ flags.DEFINE_spaceseplist('dataset_file', [], 'Dataset to load.')
 flags.DEFINE_boolean('depth_objective', False, 'Use depth image decoding as a auxiliary objective.')
 flags.DEFINE_float('depth_weight', 100, 'Weight on depth objective.')
 flags.DEFINE_string('depth_loss', 'norm_mse', 'Depth objective loss type. Choose from "norm_mse" and "eigen".')
-flags.DEFINE_float('depth_start_epoch', 80, 'Weight on depth objective.')
+flags.DEFINE_float('depth_start_epoch', 0, 'Weight on depth objective.')
 flags.DEFINE_boolean('pretrained_depth_objective', True, 'Instead of using a learned depth model, use a pretrained one.')
+flags.DEFINE_string('depth_model_path', None, 'Path to load pretrained depth model from.')
 flags.DEFINE_boolean('freeze_pretrained', False, 'Whether to freeze the weights of the pretrained depth model.')
 
 # post hoc analysis
@@ -292,18 +293,12 @@ class ModularDecoder(nn.Module):
             return x # for VAE
 
 
-def normalize_depth(t, across_dims=1):
-    dims = tuple(range(len(t.shape))[across_dims:])
-    t = t - t.amin(dim=dims, keepdim=True)
-    t = t / (t.amax(dim=dims, keepdim=True) + 1e-10)
-    return t
-
-
 class FitVid(nn.Module):
     """FitVid video predictor."""
 
     def __init__(self, stage_sizes, z_dim, g_dim, rnn_size, num_base_filters, first_block_shape, expand_decoder,
-                 skip_type, n_past, action_conditioned, action_size, is_inference, has_depth_predictor, beta, depth_weight):
+                 skip_type, n_past, action_conditioned, action_size, is_inference, has_depth_predictor, beta, depth_weight,
+                 pretrained_depth_path, freeze_depth_model):
         super(FitVid, self).__init__()
         self.n_past = n_past
         self.action_conditioned = action_conditioned
@@ -313,10 +308,12 @@ class FitVid(nn.Module):
         self.skip_type = skip_type
         self.has_depth_predictor = has_depth_predictor
         self.depth_weight = depth_weight
+        self.pretrained_depth_path = pretrained_depth_path
+        self.freeze_depth_model = freeze_depth_model
 
         if not is_inference:
             if FLAGS.depth_loss == 'norm_mse':
-                self.depth_loss = self.depth_mse_loss
+                self.depth_loss = depth_mse_loss
             elif FLAGS.depth_loss == 'eigen':
                 self.depth_loss = self.eigen_depth_loss
             else:
@@ -335,22 +332,32 @@ class FitVid(nn.Module):
             from midas.dpt_depth import DPTDepthModel
             from midas.midas_net import MidasNet
             from midas.midas_net_custom import MidasNet_small
-            model = 'mns'
-            if model == 'dpt':
+
+            depth_model_type = 'mns'
+            if self.pretrained_depth_path:
+                model_location = self.pretrained_depth_path
+            else:
+                model_location = DEFAULT_WEIGHT_LOCATIONS[depth_model_type]
+            if depth_model_type == 'dpt':
                 depth_model = DPTDepthModel(
-                    path='/viscam/u/stian/perceptual-metrics/MiDaS/weights/dpt_hybrid-midas-501f0c75.pt',
+                    path=model_location,
                     backbone="vitb_rn50_384",
                     non_negative=True,
                 )
-            elif model == 'mn':
-                depth_model = MidasNet('/viscam/u/stian/perceptual-metrics/MiDaS/weights/midas_v21-f6b98070.pt', non_negative=True)
-            elif model == 'mns':
-                depth_model = MidasNet_small('/viscam/u/stian/perceptual-metrics/MiDaS/weights/midas_v21_small-70d6b9c8.pt', features=64, backbone="efficientnet_lite3", exportable=True,
+            elif depth_model_type == 'mn':
+                depth_model = MidasNet(model_location, non_negative=True)
+            elif depth_model_type == 'mns':
+                depth_model = MidasNet_small(model_location, features=64, backbone="efficientnet_lite3", exportable=True,
                                         non_negative=True, blocks={'expand': True})
             # Setting the memory format to channels last saves around 600MB VRAM but costs computation time
             #depth_model = depth_model.to(memory_format=torch.channels_last)
             #depth_model = depth_model.half()
             self.depth_head = depth_model
+            assert (self.pretrained_depth_path and self.freeze_depth_model) or (not self.pretrained_depth_path and not self.freeze_depth_model)
+
+            if self.freeze_depth_model:
+                for param in self.depth_head.parameters():
+                    param.requires_grad = False
 
             net_w, net_h = 384, 384
             self.register_buffer('depth_head_mean', torch.Tensor([0.485, 0.456, 0.406])[..., None, None])
@@ -463,9 +470,7 @@ class FitVid(nn.Module):
             preds = (preds, depth_preds)
         return loss, preds, metrics
 
-    def depth_mse_loss(self, pred, gt, video=True):
-        dims = 2 if video else 1
-        return F.mse_loss(normalize_depth(pred, across_dims=dims), normalize_depth(gt, across_dims=dims))
+
 
     def eigen_depth_loss(self, pred, gt, lambd=0, video=True,):
         # Scale-invariant error from Eigen et.al, 2014.
@@ -553,8 +558,6 @@ class FitVid(nn.Module):
         video = video.view((batch_size, video_len,) + video.shape[1:])  # reconstuct first two dims
         return preds
 
-
-
     def batch_inference(self, video, detach):
         batch_size, video_len = video.shape[0], video.shape[1]
         prior_state = None
@@ -608,16 +611,6 @@ def get_most_recent_checkpoint(dir):
         return None, -1
 
 
-def depth_to_rgb_im(im, cmap):
-    # shape = [(T), 1, W, H]
-    # normalize
-    axes = tuple(range(len(im.shape)))[-4:]
-    im = im - np.amin(im, axis=axes, keepdims=True)
-    im = im / np.amax(im, axis=axes, keepdims=True)
-    im = np.squeeze(im)
-    # convert to rgb using given cmap
-    im = cmap(im)[..., :3]
-    return im * 255
 
 def main(argv):
     import random
@@ -640,7 +633,8 @@ def main(argv):
                    has_depth_predictor=FLAGS.depth_objective,
                    expand_decoder=FLAGS.expand,
                    beta=FLAGS.beta,
-                   depth_weight=FLAGS.depth_weight
+                   depth_weight=FLAGS.depth_weight,
+                   pretrained_depth_path=FLAGS.depth_model_path,
                    )
     NGPU = torch.cuda.device_count()
     print('CUDA available devices: ', NGPU)
@@ -833,11 +827,6 @@ def main(argv):
                 print('Saved train depth vid for the epoch')
             wandb.log(wandb_log)
 
-
-def save_moviepy_gif(obs_list, name, fps=5):
-    from moviepy.editor import ImageSequenceClip
-    clip = ImageSequenceClip(obs_list, fps=fps)
-    clip.write_gif(f'{name}.gif', fps=fps)
 
 if __name__ == "__main__":
     flags.mark_flags_as_required(['output_dir'])

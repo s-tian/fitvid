@@ -6,15 +6,15 @@ import robomimic.utils.obs_utils as ObsUtils
 from torch.utils.data import DataLoader, ConcatDataset
 
 
-def get_data_loader(dataset_paths, batch_size, video_len, phase, depth):
+def get_data_loader(dataset_paths, batch_size, video_len, phase, depth, view):
     """
     Get a data loader to sample batches of data.
     """
 
     ObsUtils.initialize_obs_utils_with_obs_specs({
         "obs": {
-            "rgb": ["agentview_image"],
-            "depth": ["agentview_depth"],
+            "rgb": [f"{view}_image"],
+            "depth": [f"{view}_depth"],
         }
     })
 
@@ -22,9 +22,9 @@ def get_data_loader(dataset_paths, batch_size, video_len, phase, depth):
 
     for i, dataset_path in enumerate(dataset_paths):
         if depth:
-            obs_keys = ("agentview_image", "agentview_depth",)
+            obs_keys = (f"{view}_image", f"{view}_depth",)
         else:
-            obs_keys = ("agentview_image",)
+            obs_keys = (f"{view}_image",)
         dataset = SequenceDataset(
             hdf5_path=dataset_path,
             obs_keys=obs_keys,                      # observations we want to appear in batches
@@ -63,23 +63,23 @@ def get_data_loader(dataset_paths, batch_size, video_len, phase, depth):
     return data_loader
 
 
-def load_dataset_robomimic_torch(dataset_path, batch_size, video_len, phase, depth):
+def load_dataset_robomimic_torch(dataset_path, batch_size, video_len, phase, depth, view='agentview'):
     assert phase in ['train', 'valid'], f'Phase is not one of the acceptable values! Got {phase}'
 
     loader = get_data_loader(dataset_path, batch_size, video_len, phase, depth)
     def prepare_data(xs):
         data_dict = {
-            'video': xs['obs']['agentview_image'],
+            'video': xs['obs'][f'{view}_image'],
             'actions': xs['actions']
         }
         if depth:
-            data_dict['depth_video'] = xs['obs']['agentview_depth']
+            data_dict['depth_video'] = xs['obs'][f'{view}_depth']
         return data_dict
 
     return loader, prepare_data
 
 
-def load_dataset_robomimic(dataset_path, batch_size, video_len, is_train, depth):
+def load_dataset_robomimic(dataset_path, batch_size, video_len, is_train, depth, view='agentview'):
     if is_train:
         phase = 'train'
     else:
@@ -90,11 +90,11 @@ def load_dataset_robomimic(dataset_path, batch_size, video_len, is_train, depth)
     
     def prepare_data(xs):
         data_dict = {
-            'video': torch.permute(xs['obs']['agentview_image'], (0, 1, 3, 4, 2)),
+            'video': torch.permute(xs['obs'][f'{view}_image'], (0, 1, 3, 4, 2)),
             'actions': xs['actions']
         }
         if depth:
-            data_dict['depth_video'] = torch.permute(xs['obs']['agentview_depth'], (0, 1, 3, 4, 2))
+            data_dict['depth_video'] = torch.permute(xs['obs'][f'{view}_depth'], (0, 1, 3, 4, 2))
 
         def _prepare(x):
             x = x.numpy()
