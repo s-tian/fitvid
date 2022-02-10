@@ -15,7 +15,8 @@ import moviepy
 import wandb
 
 from fitvid import robomimic_data
-from fitvid.depth_utils import normalize_depth, depth_to_rgb_im, depth_mse_loss, DEFAULT_WEIGHT_LOCATIONS
+from fitvid.depth_utils import normalize_depth, depth_to_rgb_im, depth_mse_loss, DEFAULT_WEIGHT_LOCATIONS, \
+                               save_moviepy_gif, dict_to_cuda
 
 FLAGS = flags.FLAGS
 
@@ -593,10 +594,6 @@ def load_data(dataset_files, data_type='train', depth=False):
     return robomimic_data.load_dataset_robomimic_torch(dataset_files, FLAGS.batch_size, video_len, data_type, depth, view=FLAGS.camera_view)
 
 
-def dict_to_cuda(d):
-    return {k: v.cuda() for k, v in d.items()}
-
-
 def get_most_recent_checkpoint(dir):
     if os.path.isdir(dir):
         pass
@@ -649,7 +646,7 @@ def main(argv):
 
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
-    data_loader, prep_data = load_data(FLAGS.dataset_file, data_type='train', depth=FLAGS.depth_objective)
+    data_loader, prep_data = load_data(FLAGS.dataset_file, data_type='valid', depth=FLAGS.depth_objective)
     test_data_loader, prep_data_test = load_data(FLAGS.dataset_file, data_type='valid', depth=FLAGS.depth_objective)
 
     wandb.init(
@@ -675,7 +672,7 @@ def main(argv):
     num_batch_to_save = 1
 
     for epoch in range(resume_epoch+1, num_epochs):
-        predicting_depth = FLAGS.depth_objective and epoch > FLAGS.depth_start_epoch
+        predicting_depth = FLAGS.depth_objective and epoch >= FLAGS.depth_start_epoch
 
         print(f'\nEpoch {epoch} / {num_epochs}')
         train_save_videos = []
@@ -749,7 +746,6 @@ def main(argv):
             if NGPU > 1:
                 loss = loss.mean()
                 metrics = {k: v.mean() for k, v in metrics.items()}
-            print(loss)
             loss.backward()
 
             optimizer.step()

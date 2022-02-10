@@ -38,10 +38,14 @@ def depth_to_rgb_im(im, cmap=plt.get_cmap('jet_r')):
 
 
 def depth_mse_loss(pred, gt):
-    return F.mse_loss(normalize_depth(pred, across_dims=dims), normalize_depth(gt, across_dims=dims))
+    return F.mse_loss(normalize_depth(pred, across_dims=1), normalize_depth(gt, across_dims=1))
 
 
 def save_moviepy_gif(obs_list, name, fps=5):
     from moviepy.editor import ImageSequenceClip
     clip = ImageSequenceClip(obs_list, fps=fps)
     clip.write_gif(f'{name}.gif', fps=fps)
+
+
+def dict_to_cuda(d):
+    return {k: v.cuda() for k, v in d.items()}
