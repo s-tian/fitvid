@@ -15,7 +15,6 @@ import moviepy
 import wandb
 
 from fitvid import robomimic_data
-from fitvid.resize_right.resize_right import resize
 
 FLAGS = flags.FLAGS
 
