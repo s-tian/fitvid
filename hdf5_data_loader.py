@@ -8,7 +8,7 @@ import random
 import pdb
 import matplotlib.pyplot as plt
 import imageio
-from torchvision.transforms import Resize, RandomResizedCrop
+from torchvision.transforms import Resize, RandomResizedCrop, ColorJitter
 import imp
 from torch.utils.data import DataLoader
 import os
@@ -106,7 +106,8 @@ class FixLenVideoDataset(BaseVideoDataset):
         self.cached_data = dict()
 
         # data augmentation
-        self.transform = RandomResizedCrop((self.img_sz[0], self.img_sz[1]), scale=(0.8, 1.0), ratio=(1., 1.))
+        #self.transform = RandomResizedCrop((self.img_sz[0], self.img_sz[1]), scale=(0.8, 1.0), ratio=(1., 1.))
+        self.transform = ColorJitter(brightness=0.1, contrast=0.1)
 
         print(phase)
         print(len(self.filenames))
