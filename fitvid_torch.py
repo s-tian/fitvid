@@ -559,29 +559,6 @@ class FitVid(nn.Module):
         video = video.view((batch_size, video_len,) + video.shape[1:])  # reconstuct first two dims
         return preds
 
-    def batch_inference(self, video, detach):
-        batch_size, video_len = video.shape[0], video.shape[1]
-        prior_state = None
-        posterior_state = None
-        video = video.view((batch_size*video_len,) + video.shape[2:]) # collapse first two dims
-        hidden, skips = self.encoder(video)
-        reprs = []
-        hidden = hidden.view((batch_size, video_len) + hidden.shape[1:])
-        for i in range(0, video_len):
-            h = hidden[:, i]
-            (_, prior_mu, prior_logvar), prior_state = self.prior(h, prior_state)
-            (_, posterior_mu, posterior_logvar), posterior_state = self.posterior(h, posterior_state)
-            if detach:
-                reprs.append([h.detach(), prior_mu.detach(), posterior_mu.detach()])
-            else:
-                reprs.append([h, prior_mu, posterior_mu])
-        return reprs
-
-    def inference(self, image, states):
-        h, skips = self.encoder(image)
-        (_, z_mu, _), states = self.prior(h, states)
-        return z_mu, h, states
-
     def load_parameters(self, path):
         # load everything
         state_dict = torch.load(path)
@@ -733,7 +710,6 @@ def main(argv):
 
             batch_idx, batch = iter_item
             batch = dict_to_cuda(prep_data(batch))
-            #batch = prep_data(batch)
             if predicting_depth:
                 inputs = batch['video'], batch['actions'], batch['depth_video']
             else:
@@ -776,18 +752,6 @@ def main(argv):
             print(f'Saved model to {save_path}')
         else:
             print('Skip saving models')
-
-        # plot the train/test curve so far
-        # plt.figure()
-        # x_train = np.linspace(0, epoch+1, len(train_mse))
-        # plt.plot(x_train, train_mse, 'b', marker='x', label='train_mse')
-        # plt.plot(np.arange(epoch+1), test_mse, 'r', marker='x', label='test_mse')
-        # plt.xlabel('Epoch')
-        # plt.ylabel('MSE')
-        # plt.legend()
-        # plt.savefig(os.path.join(FLAGS.output_dir, 'losses.png'))
-        # plt.close()
-        # print('Saved loss curve')
 
         if epoch % 1 == 0:
             wandb_log = dict()

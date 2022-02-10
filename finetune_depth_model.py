@@ -9,8 +9,8 @@ from fitvid.fitvid_torch import dict_to_cuda, normalize_depth
 from fitvid.robomimic_data import load_dataset_robomimic_torch
 from fitvid.depth_utils import normalize_depth, depth_to_rgb_im, save_moviepy_gif, DEFAULT_WEIGHT_LOCATIONS
 
-def load_model(model_name, path):
 
+def load_model(model_name, path):
     assert model_name in DEFAULT_WEIGHT_LOCATIONS.keys(), f"Model name was {model_name} but must be in {list(default_locations.keys())}"
     checkpoint = path if path else DEFAULT_WEIGHT_LOCATIONS[model_name]
     if model_name == 'dpt':
@@ -79,6 +79,11 @@ def main(args):
 
     optimizer = torch.optim.Adam(model.parameters())
 
+    output_folder = os.path.dirname(args.output_file)
+    if not os.path.exists(output_folder):
+        print(f'Creating output folder {output_folder}')
+        os.makedirs(output_folder)
+
     for epoch in range(args.epochs):
         model.train()
         for i, batch in tqdm.tqdm(enumerate(train_loader)):
@@ -98,7 +103,7 @@ def main(args):
                 print(f'Train loss: {loss}')
             if i > train_steps_per_epoch:
                 break
-        log_preds(os.path.dirname(args.output_file), preds, epoch, 'train')
+        log_preds(output_folder, preds, epoch, 'train')
         print(f'Epoch {epoch} training loss: {loss}')
         model.eval()
         print('Running validation...')
@@ -113,9 +118,9 @@ def main(args):
             if i > val_steps_per_epoch:
                 break
         print(f'Epoch {epoch} validation loss: {val_loss}')
-        log_preds(os.path.dirname(args.output_file), preds, epoch, 'val')
+        log_preds(output_folder, preds, epoch, 'val')
 
-    torch.save(model.state_dict(), args.output_file)
+        torch.save(model.state_dict(), args.output_file)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Finetune MiDaS depth model.")
