@@ -27,6 +27,7 @@ flags.DEFINE_integer('num_epochs', 1000, 'Number of steps to train for.')
 flags.DEFINE_float('beta', 1e-4, 'Weight on KL.')
 flags.DEFINE_string('data_in_gpu', 'True', 'whether to put data in GPU, or RAM')
 flags.DEFINE_string('loss', 'l2', 'whether to use l2 or l1 loss')
+flags.DEFINE_float('weight_decay', 0.0, 'weight decay value')
 
 # Model architecture
 flags.DEFINE_integer('z_dim', 10, 'LSTM output size.') #
@@ -661,7 +662,7 @@ def main(argv):
     model = torch.nn.DataParallel(model)
     model.to('cuda:0')
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=FLAGS.weight_decay)
 
     if FLAGS.hdf5_data:
         from fitvid.hdf5_data_loader import load_hdf5_data
