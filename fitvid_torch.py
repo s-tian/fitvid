@@ -360,6 +360,7 @@ class FitVid(nn.Module):
             if self.freeze_depth_model:
                 for param in self.depth_head.parameters():
                     param.requires_grad = False
+            self.depth_head.eval()
 
             net_w, net_h = 384, 384
             self.register_buffer('depth_head_mean', torch.Tensor([0.485, 0.456, 0.406])[..., None, None])

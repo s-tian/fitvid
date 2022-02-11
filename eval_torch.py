@@ -52,7 +52,9 @@ def log_eval_gifs():
                    has_depth_predictor=FLAGS.depth_objective,
                    expand_decoder=FLAGS.expand,
                    beta=FLAGS.beta,
-                   depth_weight=FLAGS.depth_weight
+                   depth_weight=FLAGS.depth_weight,
+                   pretrained_depth_path = FLAGS.depth_model_path,
+                   freeze_depth_model = FLAGS.freeze_pretrained,
                    )
     NGPU = torch.cuda.device_count()
     print('CUDA available devices: ', NGPU)
