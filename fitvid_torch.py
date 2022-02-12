@@ -17,6 +17,7 @@ import wandb
 from fitvid import robomimic_data
 from fitvid.depth_utils import normalize_depth, depth_to_rgb_im, depth_mse_loss, DEFAULT_WEIGHT_LOCATIONS, \
                                save_moviepy_gif, dict_to_cuda
+from fitvid.pytorch_metrics import psnr, lpips, ssim, tv
 
 FLAGS = flags.FLAGS
 
@@ -412,17 +413,25 @@ class FitVid(nn.Module):
                      + torch.square(mean1 - mean2) * torch.exp(-logvar2))
         return torch.sum(kld) / batch_size
 
-    def forward(self, video, actions, depth=None):
+    def forward(self, video, actions, depth=None, compute_metrics=False):
         batch_size, video_len = video.shape[0], video.shape[1]
         video = video.view((batch_size*video_len,) + video.shape[2:]) # collapse first two dims
         hidden, skips = self.encoder(video)
         hidden = hidden.view((batch_size, video_len) + hidden.shape[1:])
         video = video.view((batch_size, video_len,) + video.shape[1:])  # reconstruct first two dims
         skips = {k: skips[k].view((batch_size, video_len,) + tuple(skips[k].shape[1:]))[:, self.n_past - 1] for k in skips.keys()}
-        loss, preds, metrics = self.calc_loss_helper(video, actions, hidden, skips, self.posterior, self.prior, self.frame_predictor, depth=depth)
+        loss, preds, metrics = self.calc_loss_helper(video, actions, hidden, skips, self.posterior, self.prior, self.frame_predictor, depth=depth, compute_metrics=compute_metrics)
         return loss, preds, metrics
 
-    def calc_loss_helper(self, video, actions, hidden, skips, posterior, prior, frame_predictor, depth=None):
+    def compute_metrics(self, vid1, vid2):
+        return {
+            'metrics/psnr': psnr(vid1, vid2),
+            'metrics/lpips': lpips(vid1, vid2),
+            'metrics/tv': tv(vid1, vid2),
+            'metrics/ssim': ssim(vid1, vid2),
+        }
+
+    def calc_loss_helper(self, video, actions, hidden, skips, posterior, prior, frame_predictor, depth=None, compute_metrics=False):
         if self.is_inference:
             assert False
         #video, actions = batch['video'], batch['actions']
@@ -466,6 +475,9 @@ class FitVid(nn.Module):
             'loss/all': loss,
         }
 
+        if compute_metrics:
+            metrics.update(self.compute_metrics(preds, video[:, 1:]))
+
         if self.has_depth_predictor and depth is not None:
             metrics.update({
                 'loss/depth_loss': depth_loss
@@ -486,7 +498,7 @@ class FitVid(nn.Module):
         loss = loss.mean()
         return loss
 
-    def evaluate(self, batch):
+    def evaluate(self, batch, compute_metrics=False):
         """Predict the full video conditioned on the first self.n_past frames. """
         if self.is_inference:
             assert False
@@ -521,15 +533,21 @@ class FitVid(nn.Module):
 
         video = video.view((batch_size, video_len,) + video.shape[1:])  # reconstuct first two dims
         mse = F.mse_loss(preds, video[:, 1:])
+        metrics = {
+            'loss/mse': mse,
+        }
+
+        if compute_metrics:
+            metrics.update(self.compute_metrics(preds, video[:, 1:]))
 
         if self.has_depth_predictor and 'depth_video' in batch:
             depth_preds = torch.stack(depth_preds, axis=1)
             depth_video = batch['depth_video']
             depth_loss = self.depth_loss(depth_preds, depth_video[:, 1:])
-            mse = (mse, depth_loss)
             preds = (preds, depth_preds)
+            metrics.update({'loss/depth_mse': depth_loss})
 
-        return mse, preds
+        return metrics, preds
 
     def test(self, batch):
         """Predict the full video conditioned on the first self.n_past frames. """
@@ -670,9 +688,8 @@ def main(argv):
                 test_videos = batch['video']
                 if not predicting_depth and 'depth_video' in batch:
                     batch.pop('depth_video')
-                mse, eval_preds = model.module.evaluate(batch)
+                metrics, eval_preds = model.module.evaluate(batch, compute_metrics=test_batch_idx == len(test_data_loader) - 1)
                 if predicting_depth:
-                    mse, depth_mse = mse
                     eval_preds, eval_depth_preds = eval_preds
                     if test_batch_idx < num_batch_to_save:
                         save_depth_vids = torch.cat([batch['depth_video'][:4, 1:], eval_depth_preds[:4]], dim=-1).detach().cpu().numpy() # save only first 4 of a batch
@@ -681,15 +698,14 @@ def main(argv):
                 if test_batch_idx < num_batch_to_save:
                     save_vids = torch.cat([test_videos[:4, 1:], eval_preds[:4]], dim=-1).detach().cpu().numpy() # save only first 4 of a batch
                     [test_save_videos.append(vid) for vid in save_vids]
-                epoch_mse.append(mse.item())
+                epoch_mse.append(metrics['loss/mse'].item())
                 if FLAGS.debug and test_batch_idx > 5:
                     break
             test_mse.append(np.mean(epoch_mse))
-            wandb_log.update({'eval/mse': mse})
             if predicting_depth:
                 test_depth_mse.append(np.mean(epoch_depth_mse))
-                wandb_log.update({'eval/depth_mse': np.mean(epoch_depth_mse)})
                 print(f'Test Depth MSE: {test_depth_mse[-1]}')
+            wandb_log.update({f'eval/{k}': v for k, v in metrics.items()})
             wandb.log(wandb_log)
         print(f'Test MSE: {test_mse[-1]}')
 
@@ -715,7 +731,7 @@ def main(argv):
                 inputs = batch['video'], batch['actions'], batch['depth_video']
             else:
                 inputs = batch['video'], batch['actions']
-            loss, preds, metrics = model(*inputs)
+            loss, preds, metrics = model(*inputs, compute_metrics=batch_idx % 200 == 0)
 
             if predicting_depth:
                 preds, depth_preds = preds
