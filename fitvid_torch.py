@@ -641,8 +641,11 @@ def main(argv):
     model.to('cuda:0')
 
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-
-    data_loader, prep_data = load_data(FLAGS.dataset_file, data_type='valid', depth=FLAGS.depth_objective)
+    if FLAGS.debug:
+        # hack to make data loading and training faster
+        data_loader, prep_data = load_data(FLAGS.dataset_file, data_type='valid', depth=FLAGS.depth_objective)
+    else:
+        data_loader, prep_data = load_data(FLAGS.dataset_file, data_type='train', depth=FLAGS.depth_objective)
     test_data_loader, prep_data_test = load_data(FLAGS.dataset_file, data_type='valid', depth=FLAGS.depth_objective)
 
     wandb.init(
@@ -688,9 +691,11 @@ def main(argv):
                 test_videos = batch['video']
                 if not predicting_depth and 'depth_video' in batch:
                     batch.pop('depth_video')
-                metrics, eval_preds = model.module.evaluate(batch, compute_metrics=test_batch_idx == len(test_data_loader) - 1)
+                with torch.no_grad():
+                    metrics, eval_preds = model.module.evaluate(batch, compute_metrics=test_batch_idx == len(test_data_loader) - 1)
                 if predicting_depth:
                     eval_preds, eval_depth_preds = eval_preds
+                    depth_mse = metrics['loss/depth_mse']
                     if test_batch_idx < num_batch_to_save:
                         save_depth_vids = torch.cat([batch['depth_video'][:4, 1:], eval_depth_preds[:4]], dim=-1).detach().cpu().numpy() # save only first 4 of a batch
                         [test_save_depth_videos.append(vid) for vid in save_depth_vids]
