@@ -18,6 +18,10 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+""" Usage example: 
+python eval_torch.py --output_dir torch-outputs/5Hz-agentview-shift2-expert-bl/model_epoch40 --dataset_file  "/viscam/u/stian/perceptual-metrics/robosuite/robosuite/models/assets/policy_rollouts/pushcenter_osc_position_eval/image_and_depth.hdf5" --rnn_size 128 --g_dim 64 --batch_size 24  --save_freq 10 --camera_view agentview_shift_2 
+"""
+
 import os
 import time
 

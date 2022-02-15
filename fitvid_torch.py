@@ -13,6 +13,7 @@ from copy import deepcopy
 from tqdm import tqdm
 import moviepy
 import wandb
+import piq
 
 from fitvid import robomimic_data
 from fitvid.depth_utils import normalize_depth, depth_to_rgb_im, depth_mse_loss, DEFAULT_WEIGHT_LOCATIONS, \
@@ -313,6 +314,7 @@ class FitVid(nn.Module):
         self.depth_weight = depth_weight
         self.pretrained_depth_path = pretrained_depth_path
         self.freeze_depth_model = freeze_depth_model
+        self.lpips = piq.LPIPS()
 
         if not is_inference:
             if FLAGS.depth_loss == 'norm_mse':
@@ -380,8 +382,6 @@ class FitVid(nn.Module):
 
         pred_frame = pred_frame
         pred_frame = torch.nn.Upsample(scale_factor=4)(pred_frame)
-        #pred_frame = pred_frame.to(memory_format=torch.channels_last).half()
-        #pred_frame = pred_frame.half()
         depth_pred = self.depth_head(pred_frame)[:, None].float()
         # normalize to [0, 1]
         depth_pred = torch.nn.functional.interpolate(depth_pred, size=(64, 64))
@@ -426,7 +426,7 @@ class FitVid(nn.Module):
     def compute_metrics(self, vid1, vid2):
         return {
             'metrics/psnr': psnr(vid1, vid2),
-            'metrics/lpips': lpips(vid1, vid2),
+            'metrics/lpips': lpips(self.lpips, vid1, vid2),
             'metrics/tv': tv(vid1, vid2),
             'metrics/ssim': ssim(vid1, vid2),
         }
@@ -691,8 +691,7 @@ def main(argv):
                 test_videos = batch['video']
                 if not predicting_depth and 'depth_video' in batch:
                     batch.pop('depth_video')
-                with torch.no_grad():
-                    metrics, eval_preds = model.module.evaluate(batch, compute_metrics=test_batch_idx == len(test_data_loader) - 1)
+                    metrics, eval_preds = model.module.evaluate(batch, compute_metrics=test_batch_idx == 500)
                 if predicting_depth:
                     eval_preds, eval_depth_preds = eval_preds
                     depth_mse = metrics['loss/depth_mse']
@@ -705,6 +704,8 @@ def main(argv):
                     [test_save_videos.append(vid) for vid in save_vids]
                 epoch_mse.append(metrics['loss/mse'].item())
                 if FLAGS.debug and test_batch_idx > 5:
+                    break
+                if test_batch_idx == 500:
                     break
             test_mse.append(np.mean(epoch_mse))
             if predicting_depth:
@@ -736,7 +737,7 @@ def main(argv):
                 inputs = batch['video'], batch['actions'], batch['depth_video']
             else:
                 inputs = batch['video'], batch['actions']
-            loss, preds, metrics = model(*inputs, compute_metrics=batch_idx % 200 == 0)
+            loss, preds, metrics = model(*inputs, compute_metrics=(batch_idx % 200 == 0))
 
             if predicting_depth:
                 preds, depth_preds = preds

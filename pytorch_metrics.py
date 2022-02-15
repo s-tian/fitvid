@@ -24,5 +24,5 @@ def tv(vid1, vid2):
     return torch.mean(piq.total_variation(vid1))
 
 
-def lpips(vid1, vid2):
-    return apply_function_metric(lambda x, y: piq.LPIPS()(x, y), vid1, vid2)
+def lpips(lpips, vid1, vid2):
+    return apply_function_metric(lambda x, y: lpips(x, y), vid1, vid2)
