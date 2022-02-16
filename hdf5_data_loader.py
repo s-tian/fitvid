@@ -88,6 +88,8 @@ class FixLenVideoDataset(BaseVideoDataset):
         """
         super().__init__(data_dir, mpar, data_conf, phase, shuffle)
 
+        print(f'Loading dataset from {data_dir}, phase: {phase}')
+
         self.filenames = self._get_filenames()
         random.seed(1)
         random.shuffle(self.filenames)
