@@ -494,12 +494,12 @@ class FitVid(nn.Module):
 
         if segmentation is not None:
             metrics.update({
-                'loss/segmented_pixel_mse': upweighted_loss.detach().cpu()
+                'loss/segmented_pixel_mse': upweighted_loss.detach()
             })
 
         if self.has_depth_predictor and depth is not None:
             metrics.update({
-                'loss/depth_loss': depth_loss.detach().cpu()
+                'loss/depth_loss': depth_loss.detach()
             })
         if self.has_depth_predictor and depth is not None:
             preds = (preds, depth_preds)
