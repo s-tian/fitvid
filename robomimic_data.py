@@ -14,17 +14,16 @@ def get_data_loader(dataset_paths, batch_size, video_len, phase, depth, view):
     ObsUtils.initialize_obs_utils_with_obs_specs({
         "obs": {
             "rgb": [f"{view}_image"],
-            "depth": [f"{view}_depth"],
+            "depth": [f"{view}_depth", f"{view}_segmentation_instance"],
         }
     })
 
     all_datasets = []
-
     for i, dataset_path in enumerate(dataset_paths):
+        obs_keys = (f"{view}_image", f"{view}_segmentation_instance")
         if depth:
-            obs_keys = (f"{view}_image", f"{view}_depth",)
-        else:
-            obs_keys = (f"{view}_image",)
+            obs_keys = obs_keys + (f"{view}_depth",)
+
         dataset = SequenceDataset(
             hdf5_path=dataset_path,
             obs_keys=obs_keys,                      # observations we want to appear in batches
@@ -67,11 +66,19 @@ def load_dataset_robomimic_torch(dataset_path, batch_size, video_len, phase, dep
     assert phase in ['train', 'valid'], f'Phase is not one of the acceptable values! Got {phase}'
 
     loader = get_data_loader(dataset_path, batch_size, video_len, phase, depth, view)
+
     def prepare_data(xs):
         data_dict = {
             'video': xs['obs'][f'{view}_image'],
-            'actions': xs['actions']
+            'actions': xs['actions'],
+            'segmentation': xs['obs'][f'{view}_segmentation_instance']
         }
+        # zero out the parts of the segmentation which are not assigned label corresponding to object of interest
+        # set the object label components to 1
+        object_seg_index = 1
+        data_dict['segmentation'][data_dict['segmentation'] != object_seg_index] = 0
+        data_dict['segmentation'][data_dict['segmentation'] == object_seg_index] = 1
+
         if depth:
             data_dict['depth_video'] = xs['obs'][f'{view}_depth']
         return data_dict

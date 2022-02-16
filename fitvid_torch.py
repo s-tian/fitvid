@@ -30,6 +30,7 @@ flags.DEFINE_integer('n_future', 10, 'Number of future frames.') # not used, inf
 flags.DEFINE_integer('num_epochs', 1000, 'Number of steps to train for.')
 flags.DEFINE_float('beta', 1e-4, 'Weight on KL.')
 flags.DEFINE_string('data_in_gpu', 'True', 'whether to put data in GPU, or RAM')
+flags.DEFINE_float('segmentation_loss_weight', 0, 'Extra weight on object component of image.')
 
 # Model architecture
 flags.DEFINE_integer('z_dim', 10, 'LSTM output size.') #
@@ -302,7 +303,7 @@ class FitVid(nn.Module):
 
     def __init__(self, stage_sizes, z_dim, g_dim, rnn_size, num_base_filters, first_block_shape, expand_decoder,
                  skip_type, n_past, action_conditioned, action_size, is_inference, has_depth_predictor, beta, depth_weight,
-                 pretrained_depth_path, freeze_depth_model):
+                 pretrained_depth_path, freeze_depth_model, segmentation_loss_weight):
         super(FitVid, self).__init__()
         self.n_past = n_past
         self.action_conditioned = action_conditioned
@@ -314,6 +315,7 @@ class FitVid(nn.Module):
         self.depth_weight = depth_weight
         self.pretrained_depth_path = pretrained_depth_path
         self.freeze_depth_model = freeze_depth_model
+        self.segmentation_loss_weight = segmentation_loss_weight
         self.lpips = piq.LPIPS()
 
         if not is_inference:
@@ -413,28 +415,31 @@ class FitVid(nn.Module):
                      + torch.square(mean1 - mean2) * torch.exp(-logvar2))
         return torch.sum(kld) / batch_size
 
-    def forward(self, video, actions, depth=None, compute_metrics=False):
+    def forward(self, video, actions, segmentation=None, depth=None, compute_metrics=False):
         batch_size, video_len = video.shape[0], video.shape[1]
         video = video.view((batch_size*video_len,) + video.shape[2:]) # collapse first two dims
         hidden, skips = self.encoder(video)
         hidden = hidden.view((batch_size, video_len) + hidden.shape[1:])
         video = video.view((batch_size, video_len,) + video.shape[1:])  # reconstruct first two dims
         skips = {k: skips[k].view((batch_size, video_len,) + tuple(skips[k].shape[1:]))[:, self.n_past - 1] for k in skips.keys()}
-        loss, preds, metrics = self.calc_loss_helper(video, actions, hidden, skips, self.posterior, self.prior, self.frame_predictor, depth=depth, compute_metrics=compute_metrics)
+        loss, preds, metrics = self.calc_loss_helper(video, actions, hidden, skips, self.posterior, self.prior,
+                                                     self.frame_predictor, depth=depth, segmentation=segmentation,
+                                                     compute_metrics=compute_metrics)
         return loss, preds, metrics
 
     def compute_metrics(self, vid1, vid2):
-        return {
-            'metrics/psnr': psnr(vid1, vid2),
-            'metrics/lpips': lpips(self.lpips, vid1, vid2),
-            'metrics/tv': tv(vid1, vid2),
-            'metrics/ssim': ssim(vid1, vid2),
-        }
+        with torch.no_grad():
+            return {
+                'metrics/psnr': psnr(vid1, vid2),
+                'metrics/lpips': lpips(self.lpips, vid1, vid2),
+                'metrics/tv': tv(vid1, vid2),
+                'metrics/ssim': ssim(vid1, vid2),
+            }
 
-    def calc_loss_helper(self, video, actions, hidden, skips, posterior, prior, frame_predictor, depth=None, compute_metrics=False):
+    def calc_loss_helper(self, video, actions, hidden, skips, posterior, prior, frame_predictor, depth=None,
+                         segmentation=None, compute_metrics=False):
         if self.is_inference:
             assert False
-        #video, actions = batch['video'], batch['actions']
         batch_size, video_len = video.shape[0], video.shape[1]
         pred_state = post_state = prior_state = None
 
@@ -461,7 +466,16 @@ class FitVid(nn.Module):
         mse = F.mse_loss(preds, video[:, 1:])
         loss = mse + kld * self.beta
 
+        if segmentation is not None:
+            sq_err = (preds - video[:, 1:]) ** 2
+            mask = torch.tile(segmentation[:, 1:], (1, 1, 3, 1, 1))
+            sq_err[mask != 1] = 0
+            upweighted_loss = sq_err.mean()
+            if self.segmentation_loss_weight:
+                loss = loss + upweighted_loss * self.segmentation_loss_weight
+
         if self.has_depth_predictor and depth is not None:
+            #print(torch.cuda.memory_summary('cuda:0'))
             depth_preds = self.predict_depth(preds)
             depth_loss = self.depth_loss(depth_preds, depth[:, 1:])
             loss = loss + self.depth_weight * depth_loss
@@ -478,9 +492,14 @@ class FitVid(nn.Module):
         if compute_metrics:
             metrics.update(self.compute_metrics(preds, video[:, 1:]))
 
+        if segmentation is not None:
+            metrics.update({
+                'loss/segmented_pixel_mse': upweighted_loss.detach().cpu()
+            })
+
         if self.has_depth_predictor and depth is not None:
             metrics.update({
-                'loss/depth_loss': depth_loss
+                'loss/depth_loss': depth_loss.detach().cpu()
             })
         if self.has_depth_predictor and depth is not None:
             preds = (preds, depth_preds)
@@ -503,6 +522,11 @@ class FitVid(nn.Module):
         if self.is_inference:
             assert False
         video, actions = batch['video'], batch['actions']
+        if 'segmentation' in batch:
+            segmentation = batch['segmentation']
+        else:
+            segmentation = None
+
         batch_size, video_len = video.shape[0], video.shape[1]
         pred_state = prior_state = None
         video = video.view((batch_size * video_len,) + video.shape[2:])  # collapse first two dims
@@ -539,6 +563,13 @@ class FitVid(nn.Module):
 
         if compute_metrics:
             metrics.update(self.compute_metrics(preds, video[:, 1:]))
+
+        if segmentation is not None:
+            sq_err = (preds - video[:, 1:]) ** 2
+            mask = torch.tile(segmentation[:, 1:], (1, 1, 3, 1, 1))
+            sq_err[mask != 1] = 0
+            upweighted_loss = sq_err.mean()
+            metrics.update({'loss/segmented_pixel_mse': upweighted_loss})
 
         if self.has_depth_predictor and 'depth_video' in batch:
             depth_preds = torch.stack(depth_preds, axis=1)
@@ -628,6 +659,7 @@ def main(argv):
                    depth_weight=FLAGS.depth_weight,
                    pretrained_depth_path=FLAGS.depth_model_path,
                    freeze_depth_model=FLAGS.freeze_pretrained,
+                   segmentation_loss_weight=FLAGS.segmentation_loss_weight,
                    )
     NGPU = torch.cuda.device_count()
     print('CUDA available devices: ', NGPU)
@@ -691,7 +723,7 @@ def main(argv):
                 test_videos = batch['video']
                 if not predicting_depth and 'depth_video' in batch:
                     batch.pop('depth_video')
-                    metrics, eval_preds = model.module.evaluate(batch, compute_metrics=test_batch_idx == 500)
+                metrics, eval_preds = model.module.evaluate(batch, compute_metrics=test_batch_idx == 500)
                 if predicting_depth:
                     eval_preds, eval_depth_preds = eval_preds
                     depth_mse = metrics['loss/depth_mse']
@@ -733,10 +765,11 @@ def main(argv):
 
             batch_idx, batch = iter_item
             batch = dict_to_cuda(prep_data(batch))
+            inputs = batch['video'], batch['actions'], batch['segmentation']
             if predicting_depth:
-                inputs = batch['video'], batch['actions'], batch['depth_video']
-            else:
-                inputs = batch['video'], batch['actions']
+                inputs = inputs + (batch['depth_video'],)
+
+            optimizer.zero_grad()
             loss, preds, metrics = model(*inputs, compute_metrics=(batch_idx % 200 == 0))
 
             if predicting_depth:
@@ -745,10 +778,9 @@ def main(argv):
             if NGPU > 1:
                 loss = loss.mean()
                 metrics = {k: v.mean() for k, v in metrics.items()}
-            loss.backward()
 
+            loss.backward()
             optimizer.step()
-            optimizer.zero_grad()
             train_steps += 1
 
             train_losses.append(loss.item())
