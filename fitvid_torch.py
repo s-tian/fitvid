@@ -31,6 +31,7 @@ flags.DEFINE_integer('num_epochs', 1000, 'Number of steps to train for.')
 flags.DEFINE_float('beta', 1e-4, 'Weight on KL.')
 flags.DEFINE_string('data_in_gpu', 'True', 'whether to put data in GPU, or RAM')
 flags.DEFINE_float('segmentation_loss_weight', 0, 'Extra weight on object component of image.')
+flags.DEFINE_boolean('multistep', False, 'Multi-step training.') # changed
 
 # Model architecture
 flags.DEFINE_integer('z_dim', 10, 'LSTM output size.') #
@@ -54,15 +55,16 @@ flags.DEFINE_string('camera_view', 'agentview', 'Camera view of data to load. De
 
 # depth objective
 flags.DEFINE_boolean('depth_objective', False, 'Use depth image decoding as a auxiliary objective.')
-flags.DEFINE_float('depth_weight', 100, 'Weight on depth objective.')
+flags.DEFINE_float('depth_weight', 0, 'Weight on depth objective.')
 flags.DEFINE_string('depth_loss', 'norm_mse', 'Depth objective loss type. Choose from "norm_mse" and "eigen".')
 flags.DEFINE_float('depth_start_epoch', 0, 'Weight on depth objective.')
 flags.DEFINE_boolean('pretrained_depth_objective', True, 'Instead of using a learned depth model, use a pretrained one.')
 flags.DEFINE_string('depth_model_path', None, 'Path to load pretrained depth model from.')
-flags.DEFINE_boolean('freeze_pretrained', False, 'Whether to freeze the weights of the pretrained depth model.')
+flags.DEFINE_boolean('freeze_pretrained', True, 'Whether to freeze the weights of the pretrained depth model.')
 
 # post hoc analysis
 flags.DEFINE_string('re_eval', 'False', 'Re evaluate all available checkpoints saved.')
+flags.DEFINE_boolean('train', True, 'whether or not to train model')
 flags.DEFINE_integer('re_eval_bs', 20, 'bs override')
 
 
@@ -446,19 +448,38 @@ class FitVid(nn.Module):
         kld, means, logvars = 0.0, [], []
         # training
         h_preds = []
-        for i in range(1, video_len):
-            h, h_target = hidden[:, i - 1], hidden[:, i]
-            (z_t, mu, logvar), post_state = posterior(h_target, post_state)
-            (_, prior_mu, prior_logvar), prior_state = prior(h, prior_state)
-            inp = self.get_input(h, actions[:, i - 1], z_t)
-            (_, h_pred, _), pred_state = frame_predictor(inp, pred_state)
-            h_pred = torch.sigmoid(h_pred) # TODO notice
-            h_preds.append(h_pred)
-            means.append(mu)
-            logvars.append(logvar)
-            kld += self.kl_divergence(mu, logvar, prior_mu, prior_logvar, batch_size)
-        h_preds = torch.stack(h_preds, axis=1)
-        preds = self.decoder(h_preds, skips)
+        if self.training and FLAGS.multistep:
+            preds = []
+            for i in range(1, video_len):
+                h, h_target = hidden[:, i - 1], hidden[:, i]
+                if i > self.n_past:
+                    h, _ = self.encoder(pred)
+                (z_t, mu, logvar), post_state = posterior(h_target, post_state)
+                (_, prior_mu, prior_logvar), prior_state = prior(h, prior_state)
+                inp = self.get_input(h, actions[:, i - 1], z_t)
+                (_, h_pred, _), pred_state = frame_predictor(inp, pred_state)
+                h_pred = torch.sigmoid(h_pred)  # TODO notice
+                h_preds.append(h_pred)
+                means.append(mu)
+                logvars.append(logvar)
+                kld += self.kl_divergence(mu, logvar, prior_mu, prior_logvar, batch_size)
+                pred = self.decoder(h_pred[None, :], skips)[0]
+                preds.append(pred)
+            preds = torch.stack(preds, axis=1)
+        else:
+            for i in range(1, video_len):
+                h, h_target = hidden[:, i - 1], hidden[:, i]
+                (z_t, mu, logvar), post_state = posterior(h_target, post_state)
+                (_, prior_mu, prior_logvar), prior_state = prior(h, prior_state)
+                inp = self.get_input(h, actions[:, i - 1], z_t)
+                (_, h_pred, _), pred_state = frame_predictor(inp, pred_state)
+                h_pred = torch.sigmoid(h_pred) # TODO notice
+                h_preds.append(h_pred)
+                means.append(mu)
+                logvars.append(logvar)
+                kld += self.kl_divergence(mu, logvar, prior_mu, prior_logvar, batch_size)
+            h_preds = torch.stack(h_preds, axis=1)
+            preds = self.decoder(h_preds, skips)
 
         means = torch.stack(means, axis=1)
         logvars = torch.stack(logvars, axis=1)
@@ -473,12 +494,15 @@ class FitVid(nn.Module):
             upweighted_loss = sq_err.mean()
             if self.segmentation_loss_weight:
                 loss = loss + upweighted_loss * self.segmentation_loss_weight
-
         if self.has_depth_predictor and depth is not None:
-            #print(torch.cuda.memory_summary('cuda:0'))
-            depth_preds = self.predict_depth(preds)
-            depth_loss = self.depth_loss(depth_preds, depth[:, 1:])
-            loss = loss + self.depth_weight * depth_loss
+            if self.depth_weight != 0:
+                depth_preds = self.predict_depth(preds)
+                depth_loss = self.depth_loss(depth_preds, depth[:, 1:])
+                loss = loss + self.depth_weight * depth_loss
+            else:
+                with torch.no_grad():
+                    depth_preds = self.predict_depth(preds)
+                    depth_loss = self.depth_loss(depth_preds, depth[:, 1:])
 
         # Metrics
         metrics = {
@@ -612,7 +636,7 @@ class FitVid(nn.Module):
     def load_parameters(self, path):
         # load everything
         state_dict = torch.load(path)
-        self.load_state_dict(state_dict, strict=True)
+        self.load_state_dict(state_dict, strict=False)
         print(f'Loaded checkpoint {path}')
 
 
@@ -642,6 +666,8 @@ def main(argv):
     np.random.seed(0)
     os.environ['PYTHONHASHSEED'] = str(0)
 
+    assert (FLAGS.depth_weight != 0 and FLAGS.depth_objective) or (FLAGS.depth_weight == 0 and not FLAGS.depth_objective)
+
     model = FitVid(stage_sizes=[int(i) for i in FLAGS.stage_sizes],
                    z_dim=FLAGS.z_dim,
                    g_dim=FLAGS.g_dim,
@@ -653,7 +679,7 @@ def main(argv):
                    action_conditioned=eval(FLAGS.action_conditioned),
                    action_size=4, # hardcode for now
                    is_inference=False,
-                   has_depth_predictor=FLAGS.depth_objective,
+                   has_depth_predictor=FLAGS.pretrained_depth_objective,
                    expand_decoder=FLAGS.expand,
                    beta=FLAGS.beta,
                    depth_weight=FLAGS.depth_weight,
@@ -675,10 +701,10 @@ def main(argv):
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     if FLAGS.debug:
         # hack to make data loading and training faster
-        data_loader, prep_data = load_data(FLAGS.dataset_file, data_type='valid', depth=FLAGS.depth_objective)
+        data_loader, prep_data = load_data(FLAGS.dataset_file, data_type='train', depth=FLAGS.pretrained_depth_objective)
     else:
-        data_loader, prep_data = load_data(FLAGS.dataset_file, data_type='train', depth=FLAGS.depth_objective)
-    test_data_loader, prep_data_test = load_data(FLAGS.dataset_file, data_type='valid', depth=FLAGS.depth_objective)
+        data_loader, prep_data = load_data(FLAGS.dataset_file, data_type='train', depth=FLAGS.pretrained_depth_objective)
+    test_data_loader, prep_data_test = load_data(FLAGS.dataset_file, data_type='valid', depth=FLAGS.pretrained_depth_objective)
 
     wandb.init(
         project='perceptual-metrics',
@@ -702,8 +728,8 @@ def main(argv):
     train_steps = 0
     num_batch_to_save = 1
 
-    for epoch in range(resume_epoch+1, num_epochs):
-        predicting_depth = FLAGS.depth_objective and epoch >= FLAGS.depth_start_epoch
+    for epoch in range(resume_epoch+1, resume_epoch+num_epochs):
+        predicting_depth = FLAGS.pretrained_depth_objective
 
         print(f'\nEpoch {epoch} / {num_epochs}')
         train_save_videos = []
@@ -723,7 +749,7 @@ def main(argv):
                 test_videos = batch['video']
                 if not predicting_depth and 'depth_video' in batch:
                     batch.pop('depth_video')
-                metrics, eval_preds = model.module.evaluate(batch, compute_metrics=test_batch_idx == 500)
+                metrics, eval_preds = model.module.evaluate(batch, compute_metrics=test_batch_idx % 500 == 0)
                 if predicting_depth:
                     eval_preds, eval_depth_preds = eval_preds
                     depth_mse = metrics['loss/depth_mse']
@@ -735,7 +761,10 @@ def main(argv):
                     save_vids = torch.cat([test_videos[:4, 1:], eval_preds[:4]], dim=-1).detach().cpu().numpy() # save only first 4 of a batch
                     [test_save_videos.append(vid) for vid in save_vids]
                 epoch_mse.append(metrics['loss/mse'].item())
-                if FLAGS.debug and test_batch_idx > 5:
+                if test_batch_idx % 500 == 0:
+                    wandb_log.update({f'eval/{k}': v for k, v in metrics.items()})
+                    wandb.log(wandb_log)
+                if FLAGS.debug and test_batch_idx > 25:
                     break
                 if test_batch_idx == 500:
                     break
@@ -743,8 +772,7 @@ def main(argv):
             if predicting_depth:
                 test_depth_mse.append(np.mean(epoch_depth_mse))
                 print(f'Test Depth MSE: {test_depth_mse[-1]}')
-            wandb_log.update({f'eval/{k}': v for k, v in metrics.items()})
-            wandb.log(wandb_log)
+
         print(f'Test MSE: {test_mse[-1]}')
 
         if test_mse[-1] == np.min(test_mse):
@@ -762,7 +790,6 @@ def main(argv):
 
         for iter_item in enumerate(tqdm(data_loader)):
             wandb_log = {}
-
             batch_idx, batch = iter_item
             batch = dict_to_cuda(prep_data(batch))
             inputs = batch['video'], batch['actions'], batch['segmentation']
@@ -779,9 +806,10 @@ def main(argv):
                 loss = loss.mean()
                 metrics = {k: v.mean() for k, v in metrics.items()}
 
-            loss.backward()
-            optimizer.step()
-            train_steps += 1
+            if FLAGS.train:
+                loss.backward()
+                optimizer.step()
+                train_steps += 1
 
             train_losses.append(loss.item())
             train_mse.append(metrics['loss/mse'].item())
@@ -795,7 +823,7 @@ def main(argv):
 
             wandb_log.update({f'train/{k}': v for k, v in metrics.items()})
             wandb.log(wandb_log)
-            if FLAGS.debug and batch_idx > 5:
+            if FLAGS.debug and batch_idx > 25:
                 break
         if epoch % FLAGS.save_freq == 0:
             if os.path.isdir(FLAGS.output_dir):
