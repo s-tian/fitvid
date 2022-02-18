@@ -19,7 +19,7 @@ def psnr(vid1, vid2):
     return apply_function_metric(piq.psnr, vid1, vid2)
 
 
-def tv(vid1, vid2):
+def tv(vid1):
     vid1 = flatten_image(vid1)
     return torch.mean(piq.total_variation(vid1))
 

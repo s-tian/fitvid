@@ -29,8 +29,10 @@ flags.DEFINE_integer('n_past', 2, 'Number of past frames.')
 flags.DEFINE_integer('n_future', 10, 'Number of future frames.') # not used, inferred directly from data
 flags.DEFINE_integer('num_epochs', 1000, 'Number of steps to train for.')
 flags.DEFINE_float('beta', 1e-4, 'Weight on KL.')
+flags.DEFINE_float('tv_loss', 0.0, 'Weight on TV loss.')
 flags.DEFINE_string('data_in_gpu', 'True', 'whether to put data in GPU, or RAM')
 flags.DEFINE_float('segmentation_loss_weight', 0, 'Extra weight on object component of image.')
+flags.DEFINE_float('depth_segmentation_loss_weight', 0, 'Extra weight on object component of depth image.')
 flags.DEFINE_boolean('multistep', False, 'Multi-step training.') # changed
 
 # Model architecture
@@ -304,7 +306,7 @@ class FitVid(nn.Module):
     """FitVid video predictor."""
 
     def __init__(self, stage_sizes, z_dim, g_dim, rnn_size, num_base_filters, first_block_shape, expand_decoder,
-                 skip_type, n_past, action_conditioned, action_size, is_inference, has_depth_predictor, beta, depth_weight,
+                 skip_type, n_past, action_conditioned, action_size, is_inference, has_depth_predictor, beta, tv_loss, depth_weight,
                  pretrained_depth_path, freeze_depth_model, segmentation_loss_weight):
         super(FitVid, self).__init__()
         self.n_past = n_past
@@ -318,13 +320,12 @@ class FitVid(nn.Module):
         self.pretrained_depth_path = pretrained_depth_path
         self.freeze_depth_model = freeze_depth_model
         self.segmentation_loss_weight = segmentation_loss_weight
+        self.tv_loss = tv_loss
         self.lpips = piq.LPIPS()
 
         if not is_inference:
             if FLAGS.depth_loss == 'norm_mse':
                 self.depth_loss = depth_mse_loss
-            elif FLAGS.depth_loss == 'eigen':
-                self.depth_loss = self.eigen_depth_loss
             else:
                 raise NotImplementedError
 
@@ -434,7 +435,7 @@ class FitVid(nn.Module):
             return {
                 'metrics/psnr': psnr(vid1, vid2),
                 'metrics/lpips': lpips(self.lpips, vid1, vid2),
-                'metrics/tv': tv(vid1, vid2),
+                'metrics/tv': tv(vid1),
                 'metrics/ssim': ssim(vid1, vid2),
             }
 
@@ -487,6 +488,9 @@ class FitVid(nn.Module):
         mse = F.mse_loss(preds, video[:, 1:])
         loss = mse + kld * self.beta
 
+        if self.tv_loss:
+            loss = loss + self.tv_loss * tv(preds)
+
         if segmentation is not None:
             sq_err = (preds - video[:, 1:]) ** 2
             mask = torch.tile(segmentation[:, 1:], (1, 1, 3, 1, 1))
@@ -494,6 +498,7 @@ class FitVid(nn.Module):
             upweighted_loss = sq_err.mean()
             if self.segmentation_loss_weight:
                 loss = loss + upweighted_loss * self.segmentation_loss_weight
+
         if self.has_depth_predictor and depth is not None:
             if self.depth_weight != 0:
                 depth_preds = self.predict_depth(preds)
@@ -503,6 +508,13 @@ class FitVid(nn.Module):
                 with torch.no_grad():
                     depth_preds = self.predict_depth(preds)
                     depth_loss = self.depth_loss(depth_preds, depth[:, 1:])
+
+            if segmentation is not None:
+                sq_err = self.depth_loss(depth_preds, depth[:, 1:], reduction='none')
+                sq_err[mask != 1] = 0
+                upweighted_depth_loss = sq_err.mean()
+                if self.segmentation_depth_loss_weight:
+                    loss = loss + upweighted_depth_loss * self.segmentation_depth_loss_weight
 
         # Metrics
         metrics = {
@@ -518,28 +530,22 @@ class FitVid(nn.Module):
 
         if segmentation is not None:
             metrics.update({
-                'loss/segmented_pixel_mse': upweighted_loss.detach()
+                'loss/segmented_pixel_mse': upweighted_loss.detach(),
             })
 
         if self.has_depth_predictor and depth is not None:
             metrics.update({
                 'loss/depth_loss': depth_loss.detach()
             })
+            if segmentation is not None:
+                metrics.update({
+                    'loss/segmented_pixel_depth_mse': upweighted_depth_loss.detach()
+                })
+
         if self.has_depth_predictor and depth is not None:
             preds = (preds, depth_preds)
         return loss, preds, metrics
 
-    def eigen_depth_loss(self, pred, gt, lambd=0, video=True,):
-        # Scale-invariant error from Eigen et.al, 2014.
-        # assume that the prediction is y, not log y
-        # Not working yet!!
-        #pred = torch.log(pred + 1e-10)
-        gt = torch.log(gt + 1e-10)
-        n = np.prod(pred.shape[-2:])
-        mse = (((pred - gt)**2).sum(dim=(-1, -2, -3)) / n)
-        loss = mse - (lambd * ((pred - gt).sum(dim=(-1, -2, -3)) ** 2) / (n**2))
-        loss = loss.mean()
-        return loss
 
     def evaluate(self, batch, compute_metrics=False):
         """Predict the full video conditioned on the first self.n_past frames. """
@@ -552,7 +558,7 @@ class FitVid(nn.Module):
             segmentation = None
 
         batch_size, video_len = video.shape[0], video.shape[1]
-        pred_state = prior_state = None
+        pred_state = prior_state = post_state = None
         video = video.view((batch_size * video_len,) + video.shape[2:])  # collapse first two dims
         hidden, skips = self.encoder(video)
         skips = {k: skips[k].view((batch_size, video_len,) + tuple(skips[k].shape[1:]))[:, self.n_past - 1] for k in skips.keys()}
@@ -562,11 +568,14 @@ class FitVid(nn.Module):
         masks = []
         hidden = hidden.view((batch_size, video_len) + hidden.shape[1:])
         for i in range(1, video_len):
-            h, _ = hidden[:, i - 1], hidden[:, i]
+            h, h_target = hidden[:, i - 1], hidden[:, i]
             if i > self.n_past:
                 h, _ = self.encoder(pred)
+                (z_t, prior_mu, prior_logvar), prior_state = self.prior(h, prior_state)
+            else:
+                (z_t, mu, logvar), post_state = self.posterior(h_target, post_state)
+                (_, prior_mu, prior_logvar), prior_state = self.prior(h, prior_state)
 
-            (z_t, prior_mu, prior_logvar), prior_state = self.prior(h, prior_state)
             inp = self.get_input(h, actions[:, i - 1], z_t)
             (_, h_pred, _), pred_state = self.frame_predictor(inp, pred_state)
             h_pred = torch.sigmoid(h_pred) # TODO notice
@@ -601,6 +610,12 @@ class FitVid(nn.Module):
             depth_loss = self.depth_loss(depth_preds, depth_video[:, 1:])
             preds = (preds, depth_preds)
             metrics.update({'loss/depth_mse': depth_loss})
+
+            if segmentation is not None:
+                sq_err = self.depth_loss(depth_preds, depth[:, 1:], reduction='none')
+                sq_err[mask != 1] = 0
+                upweighted_depth_loss = sq_err.mean()
+                metrics.update({'loss/segmented_depth_mse': upweighted_depth_loss})
 
         return metrics, preds
 

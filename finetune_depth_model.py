@@ -75,7 +75,7 @@ def main(args):
     print(len(train_loader))
 
     train_steps_per_epoch = 300
-    val_steps_per_epoch = 300
+    val_steps_per_epoch = 24
 
     optimizer = torch.optim.Adam(model.parameters())
 
@@ -110,10 +110,11 @@ def main(args):
         for i, batch in enumerate(val_loader):
             batch = dict_to_cuda(val_prep(batch))
             images, depth_images = prep_batch(batch)
-            preds = model(images)
-            preds = torch.nn.functional.interpolate(preds[:, None], size=(64, 64))
-            preds = preds.reshape(-1, traj_length, *preds.shape[1:])
-            preds = 1 - normalize_depth(preds)
+            with torch.no_grad():
+                preds = model(images)
+                preds = torch.nn.functional.interpolate(preds[:, None], size=(64, 64))
+                preds = preds.reshape(-1, traj_length, *preds.shape[1:])
+                preds = 1 - normalize_depth(preds)
             val_loss = loss_fn(preds, depth_images)
             if i > val_steps_per_epoch:
                 break

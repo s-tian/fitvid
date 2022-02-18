@@ -37,8 +37,8 @@ def depth_to_rgb_im(im, cmap=plt.get_cmap('jet_r')):
     return im * 255
 
 
-def depth_mse_loss(pred, gt):
-    return F.mse_loss(normalize_depth(pred, across_dims=1), normalize_depth(gt, across_dims=1))
+def depth_mse_loss(pred, gt, reduction='mean'):
+    return F.mse_loss(normalize_depth(pred, across_dims=1), normalize_depth(gt, across_dims=1), reduction)
 
 
 def save_moviepy_gif(obs_list, name, fps=5):
