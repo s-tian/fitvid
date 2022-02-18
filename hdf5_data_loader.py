@@ -55,7 +55,7 @@ class BaseVideoDataset(data.Dataset):
         self.data_dir = data_dir
         self.data_conf = data_conf
 
-        self.shuffle = shuffle and phase == 'train'
+        self.shuffle = shuffle
         self.img_sz = mpar.img_sz
 
         if shuffle:
@@ -87,8 +87,6 @@ class FixLenVideoDataset(BaseVideoDataset):
         :param dataset_size:
         """
         super().__init__(data_dir, mpar, data_conf, phase, shuffle)
-
-        print(f'Loading dataset from {data_dir}, phase: {phase}')
 
         self.filenames = self._get_filenames()
         random.seed(1)
