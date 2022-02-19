@@ -63,7 +63,7 @@ class BaseVideoDataset(data.Dataset):
         else:
             self.n_worker = 1
         #todo debug:
-        self.n_worker = 0
+        self.n_worker = 8
 
     def get_data_loader(self, batch_size):
         print('len {} dataset {}'.format(self.phase, len(self)))
@@ -108,6 +108,24 @@ class FixLenVideoDataset(BaseVideoDataset):
         # data augmentation
         #self.transform = RandomResizedCrop((self.img_sz[0], self.img_sz[1]), scale=(0.8, 1.0), ratio=(1., 1.))
         self.transform = ColorJitter(brightness=0.1, contrast=0.1)
+        # Load data into RAM
+        for file_index in range(len(self.filenames)):
+            path = self.filenames[file_index]
+            if path not in self.cached_data:
+                print(f'Loading {path} into memory...')
+                with h5py.File(path, 'r') as F:
+                    ex_index = 0
+                    key = 'traj{}'.format(ex_index)
+
+                    # Fetch data into a dict
+                    data_dict = AttrDict(images=(F[key + '/images'][:]))
+                    for name in F[key].keys():
+                        if name in ['states', 'actions', 'pad_mask']:
+                            data_dict[name] = F[key + '/' + name][:].astype(np.float32)
+                data_dict = self.process_data_dict(data_dict)
+                # if self._data_conf.sel_len != -1:
+                # data_dict = self.sample_rand_shifts(data_dict)
+                self.cached_data[path] = data_dict
 
         print(phase)
         print(len(self.filenames))
@@ -130,22 +148,6 @@ class FixLenVideoDataset(BaseVideoDataset):
     def __getitem__(self, index):
         file_index = (index // self.traj_per_file) // self.duplicates_per_file
         path = self.filenames[file_index]
-        if path not in self.cached_data:
-            print(f'Loading {path} into memory...')
-            with h5py.File(path, 'r') as F:
-                ex_index = 0
-                key = 'traj{}'.format(ex_index)
-
-                # Fetch data into a dict
-                data_dict = AttrDict(images=(F[key + '/images'][:]))
-                for name in F[key].keys():
-                    if name in ['states', 'actions', 'pad_mask']:
-                        data_dict[name] = F[key + '/' + name][:].astype(np.float32)
-            data_dict = self.process_data_dict(data_dict)
-            #if self._data_conf.sel_len != -1:
-                #data_dict = self.sample_rand_shifts(data_dict)
-            self.cached_data[path] = data_dict
-
         segment = self.sample_rand_shifts(self.cached_data[path])
         return {
             'video': self.apply_image_aug(segment.demo_seq_images),
@@ -164,11 +166,9 @@ class FixLenVideoDataset(BaseVideoDataset):
         """ This function processes data tensors so as to have length equal to max_seq_len
         by sampling / padding if necessary """
         offset = np.random.randint(0, self.T - self._data_conf.sel_len, 1)
-
         data_dict = map_dict(lambda tensor: self._croplen(tensor, offset, self._data_conf.sel_len), data_dict)
         #if 'actions' in data_dict:
         #    data_dict.actions = data_dict.actions[:-1]
-
         return data_dict
 
     def preprocess_images(self, images):
@@ -190,7 +190,7 @@ class FixLenVideoDataset(BaseVideoDataset):
     @staticmethod
     def _croplen(val, offset, target_length):
         """Pads / crops sequence to desired length."""
-
+        return val[int(offset): int(offset) + target_length]
         val = val[int(offset):]
         len = val.shape[0]
         if len > target_length:
@@ -209,7 +209,7 @@ def load_hdf5_data(data_dir, bs, data_type='train'):
     data_dir = data_dir[0]
     hp = AttrDict(img_sz=(64, 64),
                   sel_len=12,
-                  T=31)
+                  T=600)
     loader = FixLenVideoDataset(data_dir, hp, hp, phase=data_type).get_data_loader(bs)
     return loader
 

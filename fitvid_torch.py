@@ -28,6 +28,7 @@ flags.DEFINE_float('beta', 1e-4, 'Weight on KL.')
 flags.DEFINE_string('data_in_gpu', 'True', 'whether to put data in GPU, or RAM')
 flags.DEFINE_string('loss', 'l2', 'whether to use l2 or l1 loss')
 flags.DEFINE_float('weight_decay', 0.0, 'weight decay value')
+flags.DEFINE_boolean('stochastic', True, 'Use a stochastic model.')
 
 # Model architecture
 flags.DEFINE_integer('z_dim', 10, 'LSTM output size.') #
@@ -311,6 +312,7 @@ class FitVid(nn.Module):
         self.has_depth_predictor = has_depth_predictor
         self.depth_weight = depth_weight
         self.loss_fn = loss_fn
+        self.z_dim = z_dim
 
         if not is_inference:
             if FLAGS.depth_loss == 'norm_mse':
@@ -322,37 +324,14 @@ class FitVid(nn.Module):
 
         first_block_shape = [first_block_shape[-1]] + first_block_shape[:2]
         self.encoder = ModularEncoder(stage_sizes=stage_sizes, output_size=g_dim, num_base_filters=num_base_filters)
-        self.prior = MultiGaussianLSTM(input_size=g_dim, output_size=z_dim, hidden_size=rnn_size, num_layers=1)
-        self.posterior = MultiGaussianLSTM(input_size=g_dim, output_size=z_dim, hidden_size=rnn_size, num_layers=1)
+        if FLAGS.stochastic:
+            self.prior = MultiGaussianLSTM(input_size=g_dim, output_size=z_dim, hidden_size=rnn_size, num_layers=1)
+            self.posterior = MultiGaussianLSTM(input_size=g_dim, output_size=z_dim, hidden_size=rnn_size, num_layers=1)
+        else:
+            self.prior, self.posterior = None, None
 
         self.decoder = ModularDecoder(first_block_shape=first_block_shape, input_size=g_dim, stage_sizes=stage_sizes,
                                       num_base_filters=num_base_filters, skip_type=skip_type, expand=expand_decoder)
-
-        if has_depth_predictor:
-            #assert FLAGS.pretrained_depth_objective, 'Only pretrained depth objective available right now'
-            from midas.dpt_depth import DPTDepthModel
-            from midas.midas_net import MidasNet
-            from midas.midas_net_custom import MidasNet_small
-            model = 'mns'
-            if model == 'dpt':
-                depth_model = DPTDepthModel(
-                    path='/viscam/u/stian/perceptual-metrics/MiDaS/weights/dpt_hybrid-midas-501f0c75.pt',
-                    backbone="vitb_rn50_384",
-                    non_negative=True,
-                )
-            elif model == 'mn':
-                depth_model = MidasNet('/viscam/u/stian/perceptual-metrics/MiDaS/weights/midas_v21-f6b98070.pt', non_negative=True)
-            elif model == 'mns':
-                depth_model = MidasNet_small('/viscam/u/stian/perceptual-metrics/MiDaS/weights/midas_v21_small-70d6b9c8.pt', features=64, backbone="efficientnet_lite3", exportable=True,
-                                        non_negative=True, blocks={'expand': True})
-            # Setting the memory format to channels last saves around 600MB VRAM but costs computation time
-            #depth_model = depth_model.to(memory_format=torch.channels_last)
-            #depth_model = depth_model.half()
-            self.depth_head = depth_model
-
-            net_w, net_h = 384, 384
-            self.register_buffer('depth_head_mean', torch.Tensor([0.485, 0.456, 0.406])[..., None, None])
-            self.register_buffer('depth_head_std', torch.Tensor([0.229, 0.224, 0.225])[..., None, None])
 
         input_size = self.get_input_size(g_dim, action_size, z_dim)
         self.frame_predictor = MultiGaussianLSTM(input_size=input_size, output_size=g_dim, hidden_size=rnn_size, num_layers=2)
@@ -416,33 +395,33 @@ class FitVid(nn.Module):
         batch_size, video_len = video.shape[0], video.shape[1]
         pred_state = post_state = prior_state = None
 
-        kld, means, logvars = 0.0, [], []
+        kld, means, logvars = torch.tensor(0).to(video), [], []
         # training
         h_preds = []
         for i in range(1, video_len):
             h, h_target = hidden[:, i - 1], hidden[:, i]
-            (z_t, mu, logvar), post_state = posterior(h_target, post_state)
-            (_, prior_mu, prior_logvar), prior_state = prior(h, prior_state)
+            if FLAGS.stochastic:
+                (z_t, mu, logvar), post_state = posterior(h_target, post_state)
+                (_, prior_mu, prior_logvar), prior_state = prior(h, prior_state)
+            else:
+                z_t = torch.zeros((h.shape[0], self.z_dim)).to(h)
             inp = self.get_input(h, actions[:, i - 1], z_t)
             (_, h_pred, _), pred_state = frame_predictor(inp, pred_state)
             h_pred = torch.sigmoid(h_pred) # TODO notice
             h_preds.append(h_pred)
-            means.append(mu)
-            logvars.append(logvar)
-            kld += self.kl_divergence(mu, logvar, prior_mu, prior_logvar, batch_size)
+            if FLAGS.stochastic:
+                means.append(mu)
+                logvars.append(logvar)
+                kld += self.kl_divergence(mu, logvar, prior_mu, prior_logvar, batch_size)
         h_preds = torch.stack(h_preds, axis=1)
         preds = self.decoder(h_preds, skips)
-
-        means = torch.stack(means, axis=1)
-        logvars = torch.stack(logvars, axis=1)
+        if FLAGS.stochastic:
+            means = torch.stack(means, axis=1)
+            logvars = torch.stack(logvars, axis=1)
+        else:
+            means, logvars = torch.zeros(h.shape[0], video_len-1, 1).to(h), torch.zeros(h.shape[0], video_len-1, 1).to(h)
         mse = self.loss_fn(preds, video[:, 1:])
         loss = mse + kld * self.beta
-
-        if self.has_depth_predictor and depth is not None:
-            depth_preds = self.predict_depth(preds)
-            depth_loss = self.depth_loss(depth_preds, depth[:, 1:])
-            loss = loss + self.depth_weight * depth_loss
-
         # Metrics
         metrics = {
             'hist/mean': means,
@@ -451,30 +430,12 @@ class FitVid(nn.Module):
             'loss/kld': kld,
             'loss/all': loss,
         }
-
-        if self.has_depth_predictor and depth is not None:
-            metrics.update({
-                'loss/depth_loss': depth_loss
-            })
-        if self.has_depth_predictor and depth is not None:
-            preds = (preds, depth_preds)
         return loss, preds, metrics
 
     def depth_mse_loss(self, pred, gt, video=True):
         dims = 2 if video else 1
         return F.mse_loss(self.normalize(pred, across_dims=dims), self.normalize(gt, across_dims=dims))
 
-    def eigen_depth_loss(self, pred, gt, lambd=0, video=True,):
-        # Scale-invariant error from Eigen et.al, 2014.
-        # assume that the prediction is y, not log y
-        # Not working yet!!
-        #pred = torch.log(pred + 1e-10)
-        gt = torch.log(gt + 1e-10)
-        n = np.prod(pred.shape[-2:])
-        mse = (((pred - gt)**2).sum(dim=(-1, -2, -3)) / n)
-        loss = mse - (lambd * ((pred - gt).sum(dim=(-1, -2, -3)) ** 2) / (n**2))
-        loss = loss.mean()
-        return loss
 
     def evaluate(self, batch):
         """Predict the full video conditioned on the first self.n_past frames. """
@@ -495,16 +456,16 @@ class FitVid(nn.Module):
             h, _ = hidden[:, i - 1], hidden[:, i]
             if i > self.n_past:
                 h, _ = self.encoder(pred)
-
-            (z_t, prior_mu, prior_logvar), prior_state = self.prior(h, prior_state)
+            if FLAGS.stochastic:
+                (z_t, prior_mu, prior_logvar), prior_state = self.prior(h, prior_state)
+            else:
+                z_t = torch.zeros((h.shape[0], self.z_dim)).to(h)
             inp = self.get_input(h, actions[:, i - 1], z_t)
             (_, h_pred, _), pred_state = self.frame_predictor(inp, pred_state)
             h_pred = torch.sigmoid(h_pred) # TODO notice
 
             pred = self.decoder(h_pred[None, :], skips)[0]
-            if self.has_depth_predictor and 'depth_video' in batch:
-                depth_pred = self.predict_depth(pred, time_axis=False)
-                depth_preds.append(depth_pred)
+
             preds.append(pred)
 
         preds = torch.stack(preds, axis=1)
@@ -540,7 +501,10 @@ class FitVid(nn.Module):
                 h = hidden[:, i-1]
             if i > self.n_past:
                 h, _ = self.encoder(pred)
-            (z_t, prior_mu, prior_logvar), prior_state = self.prior(h, prior_state)
+            if FLAGS.stochastic:
+                (z_t, prior_mu, prior_logvar), prior_state = self.prior(h, prior_state)
+            else:
+                z_t = torch.zeros((h.shape[0], self.z_dim)).to(h)
             inp = self.get_input(h, actions[:, i - 1], z_t)
             (_, h_pred, _), pred_state = self.frame_predictor(inp, pred_state)
             h_pred = torch.sigmoid(h_pred) # TODO notice
@@ -555,29 +519,6 @@ class FitVid(nn.Module):
         t = t - t.amin(dim=dims, keepdim=True)
         t = t / (t.amax(dim=dims, keepdim=True) + 1e-10)
         return t
-
-    def batch_inference(self, video, detach):
-        batch_size, video_len = video.shape[0], video.shape[1]
-        prior_state = None
-        posterior_state = None
-        video = video.view((batch_size*video_len,) + video.shape[2:]) # collapse first two dims
-        hidden, skips = self.encoder(video)
-        reprs = []
-        hidden = hidden.view((batch_size, video_len) + hidden.shape[1:])
-        for i in range(0, video_len):
-            h = hidden[:, i]
-            (_, prior_mu, prior_logvar), prior_state = self.prior(h, prior_state)
-            (_, posterior_mu, posterior_logvar), posterior_state = self.posterior(h, posterior_state)
-            if detach:
-                reprs.append([h.detach(), prior_mu.detach(), posterior_mu.detach()])
-            else:
-                reprs.append([h, prior_mu, posterior_mu])
-        return reprs
-
-    def inference(self, image, states):
-        h, skips = self.encoder(image)
-        (_, z_mu, _), states = self.prior(h, states)
-        return z_mu, h, states
 
     def load_parameters(self, path):
         # load everything
@@ -620,6 +561,7 @@ def depth_to_rgb_im(im, cmap):
     im = cmap(im)[..., :3]
     return im * 255
 
+
 def main(argv):
     import random
     random.seed(0)
@@ -659,7 +601,8 @@ def main(argv):
     if checkpoint:
         model.load_parameters(checkpoint)
 
-    model = torch.nn.DataParallel(model)
+    if NGPU > 1:
+        model = torch.nn.DataParallel(model)
     model.to('cuda:0')
 
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=FLAGS.weight_decay)
@@ -716,7 +659,10 @@ def main(argv):
                 test_videos = batch['video']
                 if not predicting_depth and 'depth_video' in batch:
                     batch.pop('depth_video')
-                mse, eval_preds = model.module.evaluate(batch)
+                if NGPU > 1:
+                    mse, eval_preds = model.module.evaluate(batch)
+                else:
+                    mse, eval_preds = model.evaluate(batch)
                 if predicting_depth:
                     mse, depth_mse = mse
                     eval_preds, eval_depth_preds = eval_preds
@@ -745,7 +691,10 @@ def main(argv):
             else:
                 os.mkdir(FLAGS.output_dir)
             save_path = os.path.join(FLAGS.output_dir, f'model_best')
-            torch.save(model.module.state_dict(), save_path)
+            if NGPU > 1:
+                torch.save(model.module.state_dict(), save_path)
+            else:
+                torch.save(model.state_dict(), save_path)
             print(f'Saved new best model to {save_path}')
 
         print('Training')
@@ -770,7 +719,6 @@ def main(argv):
             if NGPU > 1:
                 loss = loss.mean()
                 metrics = {k: v.mean() for k, v in metrics.items()}
-
             #print(loss)
             loss.backward()
 
@@ -798,7 +746,10 @@ def main(argv):
             else:
                 os.mkdir(FLAGS.output_dir)
             save_path = os.path.join(FLAGS.output_dir, f'model_epoch{epoch}')
-            torch.save(model.module.state_dict(), save_path)
+            if NGPU > 1:
+                torch.save(model.module.state_dict(), save_path)
+            else:
+                torch.save(model.state_dict(), save_path)
             print(f'Saved model to {save_path}')
         else:
             print('Skip saving models')
