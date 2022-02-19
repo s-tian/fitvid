@@ -29,10 +29,10 @@ flags.DEFINE_integer('n_past', 2, 'Number of past frames.')
 flags.DEFINE_integer('n_future', 10, 'Number of future frames.') # not used, inferred directly from data
 flags.DEFINE_integer('num_epochs', 1000, 'Number of steps to train for.')
 flags.DEFINE_float('beta', 1e-4, 'Weight on KL.')
-flags.DEFINE_float('tv_loss', 0.0, 'Weight on TV loss.')
+flags.DEFINE_float('tv_weight', 0.0, 'Weight on TV loss.')
 flags.DEFINE_string('data_in_gpu', 'True', 'whether to put data in GPU, or RAM')
 flags.DEFINE_float('segmentation_loss_weight', 0, 'Extra weight on object component of image.')
-flags.DEFINE_float('depth_segmentation_loss_weight', 0, 'Extra weight on object component of depth image.')
+flags.DEFINE_float('segmentation_depth_loss_weight', 0, 'Extra weight on object component of depth image.')
 flags.DEFINE_boolean('multistep', False, 'Multi-step training.') # changed
 
 # Model architecture
@@ -306,8 +306,8 @@ class FitVid(nn.Module):
     """FitVid video predictor."""
 
     def __init__(self, stage_sizes, z_dim, g_dim, rnn_size, num_base_filters, first_block_shape, expand_decoder,
-                 skip_type, n_past, action_conditioned, action_size, is_inference, has_depth_predictor, beta, tv_loss, depth_weight,
-                 pretrained_depth_path, freeze_depth_model, segmentation_loss_weight):
+                 skip_type, n_past, action_conditioned, action_size, is_inference, has_depth_predictor, beta, tv_weight, depth_weight,
+                 pretrained_depth_path, freeze_depth_model, segmentation_loss_weight, segmentation_depth_loss_weight):
         super(FitVid, self).__init__()
         self.n_past = n_past
         self.action_conditioned = action_conditioned
@@ -320,7 +320,8 @@ class FitVid(nn.Module):
         self.pretrained_depth_path = pretrained_depth_path
         self.freeze_depth_model = freeze_depth_model
         self.segmentation_loss_weight = segmentation_loss_weight
-        self.tv_loss = tv_loss
+        self.segmentation_depth_loss_weight = segmentation_depth_loss_weight
+        self.tv_weight = tv_weight
         self.lpips = piq.LPIPS()
 
         if not is_inference:
@@ -488,13 +489,14 @@ class FitVid(nn.Module):
         mse = F.mse_loss(preds, video[:, 1:])
         loss = mse + kld * self.beta
 
-        if self.tv_loss:
-            loss = loss + self.tv_loss * tv(preds)
+        if self.tv_weight:
+            loss = loss + self.tv_weight * tv(preds)
 
         if segmentation is not None:
             sq_err = (preds - video[:, 1:]) ** 2
-            mask = torch.tile(segmentation[:, 1:], (1, 1, 3, 1, 1))
-            sq_err[mask != 1] = 0
+            mask = segmentation[:, 1:]
+            mask_rgb = torch.tile(segmentation[:, 1:], (1, 1, 3, 1, 1))
+            sq_err[mask_rgb != 1] = 0
             upweighted_loss = sq_err.mean()
             if self.segmentation_loss_weight:
                 loss = loss + upweighted_loss * self.segmentation_loss_weight
@@ -599,8 +601,9 @@ class FitVid(nn.Module):
 
         if segmentation is not None:
             sq_err = (preds - video[:, 1:]) ** 2
-            mask = torch.tile(segmentation[:, 1:], (1, 1, 3, 1, 1))
-            sq_err[mask != 1] = 0
+            mask = segmentation[:, 1:]
+            mask_rgb = torch.tile(segmentation[:, 1:], (1, 1, 3, 1, 1))
+            sq_err[mask_rgb != 1] = 0
             upweighted_loss = sq_err.mean()
             metrics.update({'loss/segmented_pixel_mse': upweighted_loss})
 
@@ -612,7 +615,8 @@ class FitVid(nn.Module):
             metrics.update({'loss/depth_mse': depth_loss})
 
             if segmentation is not None:
-                sq_err = self.depth_loss(depth_preds, depth[:, 1:], reduction='none')
+                sq_err = self.depth_loss(depth_preds, depth_video[:, 1:], reduction='none')
+                print(sq_err)
                 sq_err[mask != 1] = 0
                 upweighted_depth_loss = sq_err.mean()
                 metrics.update({'loss/segmented_depth_mse': upweighted_depth_loss})
@@ -697,10 +701,12 @@ def main(argv):
                    has_depth_predictor=FLAGS.pretrained_depth_objective,
                    expand_decoder=FLAGS.expand,
                    beta=FLAGS.beta,
+                   tv_weight=FLAGS.tv_weight,
                    depth_weight=FLAGS.depth_weight,
                    pretrained_depth_path=FLAGS.depth_model_path,
                    freeze_depth_model=FLAGS.freeze_pretrained,
                    segmentation_loss_weight=FLAGS.segmentation_loss_weight,
+                   segmentation_depth_loss_weight=FLAGS.segmentation_depth_loss_weight,
                    )
     NGPU = torch.cuda.device_count()
     print('CUDA available devices: ', NGPU)
