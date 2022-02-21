@@ -301,12 +301,12 @@ class FitVid(nn.Module):
 
     def __init__(self, stage_sizes, z_dim, g_dim, rnn_size, num_base_filters, first_block_shape, expand_decoder,
                  skip_type, n_past, action_conditioned, action_size, is_inference, has_depth_predictor, beta, depth_weight,
-                 loss_fn):
+                 loss_fn, stochastic):
         super(FitVid, self).__init__()
         self.n_past = n_past
         self.action_conditioned = action_conditioned
         self.beta = beta
-        self.stochastic = True
+        self.stochastic = stochastic
         self.is_inference = is_inference
         self.skip_type = skip_type
         self.has_depth_predictor = has_depth_predictor
@@ -324,7 +324,7 @@ class FitVid(nn.Module):
 
         first_block_shape = [first_block_shape[-1]] + first_block_shape[:2]
         self.encoder = ModularEncoder(stage_sizes=stage_sizes, output_size=g_dim, num_base_filters=num_base_filters)
-        if FLAGS.stochastic:
+        if self.stochastic:
             self.prior = MultiGaussianLSTM(input_size=g_dim, output_size=z_dim, hidden_size=rnn_size, num_layers=1)
             self.posterior = MultiGaussianLSTM(input_size=g_dim, output_size=z_dim, hidden_size=rnn_size, num_layers=1)
         else:
@@ -400,7 +400,7 @@ class FitVid(nn.Module):
         h_preds = []
         for i in range(1, video_len):
             h, h_target = hidden[:, i - 1], hidden[:, i]
-            if FLAGS.stochastic:
+            if self.stochastic:
                 (z_t, mu, logvar), post_state = posterior(h_target, post_state)
                 (_, prior_mu, prior_logvar), prior_state = prior(h, prior_state)
             else:
@@ -409,13 +409,13 @@ class FitVid(nn.Module):
             (_, h_pred, _), pred_state = frame_predictor(inp, pred_state)
             h_pred = torch.sigmoid(h_pred) # TODO notice
             h_preds.append(h_pred)
-            if FLAGS.stochastic:
+            if self.stochastic:
                 means.append(mu)
                 logvars.append(logvar)
                 kld += self.kl_divergence(mu, logvar, prior_mu, prior_logvar, batch_size)
         h_preds = torch.stack(h_preds, axis=1)
         preds = self.decoder(h_preds, skips)
-        if FLAGS.stochastic:
+        if self.stochastic:
             means = torch.stack(means, axis=1)
             logvars = torch.stack(logvars, axis=1)
         else:
@@ -456,7 +456,7 @@ class FitVid(nn.Module):
             h, _ = hidden[:, i - 1], hidden[:, i]
             if i > self.n_past:
                 h, _ = self.encoder(pred)
-            if FLAGS.stochastic:
+            if self.stochastic:
                 (z_t, prior_mu, prior_logvar), prior_state = self.prior(h, prior_state)
             else:
                 z_t = torch.zeros((h.shape[0], self.z_dim)).to(h)
@@ -501,7 +501,7 @@ class FitVid(nn.Module):
                 h = hidden[:, i-1]
             if i > self.n_past:
                 h, _ = self.encoder(pred)
-            if FLAGS.stochastic:
+            if self.stochastic:
                 (z_t, prior_mu, prior_logvar), prior_state = self.prior(h, prior_state)
             else:
                 z_t = torch.zeros((h.shape[0], self.z_dim)).to(h)
@@ -592,6 +592,7 @@ def main(argv):
                    beta=FLAGS.beta,
                    depth_weight=FLAGS.depth_weight,
                    loss_fn=loss_fn,
+                   stochastic=FLAGS.stochastic
                    )
     NGPU = torch.cuda.device_count()
     print('CUDA available devices: ', NGPU)
