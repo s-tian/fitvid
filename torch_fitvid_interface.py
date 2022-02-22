@@ -20,10 +20,10 @@ class FitVidTorchModel:
             'action_conditioned': True,
             'action_size': a_dim,
             'is_inference': True,
-            'has_depth_predictor': True, # TODO don't hardcode this
+            'has_depth_predictor': False, # TODO don't hardcode this
             'beta':0, #for training, irrelevant here
             'depth_weight': 0, #for training
-            'stochastic': True
+            'stochastic': False
         }
         self.model = FitVid(**hp)
         self.model.load_parameters(checkpoint_dir)
