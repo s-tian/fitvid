@@ -14,7 +14,8 @@ def get_data_loader(dataset_paths, batch_size, video_len, phase, depth, view):
     ObsUtils.initialize_obs_utils_with_obs_specs({
         "obs": {
             "rgb": [f"{view}_image"],
-            "depth": [f"{view}_depth", f"{view}_segmentation_instance"],
+            "depth": [f"{view}_depth"],
+            "scan": [f"{view}_segmentation_instance"]
         }
     })
 
@@ -32,7 +33,7 @@ def get_data_loader(dataset_paths, batch_size, video_len, phase, depth, view):
                 "rewards", 
                 "dones",
             ),
-            load_next_obs=True,
+            load_next_obs=False,
             frame_stack=1,
             seq_length=video_len,                  # length-10 temporal sequences
             pad_frame_stack=True,
@@ -48,15 +49,13 @@ def get_data_loader(dataset_paths, batch_size, video_len, phase, depth, view):
         print(f"\n============= Created Dataset {i+1} out of {len(dataset_paths)} =============")
         print(dataset)
         print("")
-
     dataset = ConcatDataset(all_datasets)
-
     data_loader = DataLoader(
         dataset=dataset,
         sampler=None,       # no custom sampling logic (uniform sampling)
         batch_size=batch_size,     
         shuffle=True,
-        num_workers=2,
+        num_workers=0,
         drop_last=True      # don't provide last batch in dataset pass if it's less than 100 in size
     )
     return data_loader
@@ -78,6 +77,13 @@ def load_dataset_robomimic_torch(dataset_path, batch_size, video_len, phase, dep
         object_seg_index = 1
         data_dict['segmentation'][data_dict['segmentation'] != object_seg_index] = 0
         data_dict['segmentation'][data_dict['segmentation'] == object_seg_index] = 1
+        # segmentation = data_dict['segmentation'][0][0]
+        # segmentation = torch.tile(segmentation, (3, 1, 1))
+        # sample_image = data_dict['video'][0][0]
+        # sample_image[segmentation != 1] = 0
+        # sample_image[segmentation == 1] = 255
+        # from perceptual_metrics.utils import save_np_img
+        # save_np_img(np.transpose(sample_image.cpu().numpy(), (1, 2, 0)).astype(np.uint8), dataset_path[0].split('/')[-1])
 
         if depth:
             data_dict['depth_video'] = xs['obs'][f'{view}_depth']
