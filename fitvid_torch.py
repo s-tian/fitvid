@@ -14,7 +14,7 @@ from tqdm import tqdm
 import moviepy
 import wandb
 
-from fitvid import robomimic_data
+#from fitvid import robomimic_data
 
 FLAGS = flags.FLAGS
 

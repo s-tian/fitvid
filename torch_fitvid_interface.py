@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 from fitvid.fitvid_torch import FitVid
-
+import datetime
 
 class FitVidTorchModel:
 
@@ -21,14 +21,15 @@ class FitVidTorchModel:
         'has_depth_predictor': False,  # TODO don't hardcode this
         'beta': 0,  # for training, irrelevant here
         'depth_weight': 0,  # for training
-        'stochastic': False
+        'stochastic': False,
+        'loss_fn': 'l2'
     }
 
     def __init__(self, checkpoint_dir, hp_override):
         # TODO import hyperparameters nicely
         self.hp = self.DEFAULT_HP
         self.hp.update(hp_override)
-        self.model = FitVid(**hp)
+        self.model = FitVid(**self.hp)
         self.model.load_parameters(checkpoint_dir)
         self.model.cuda()
         self.model.eval()
@@ -49,17 +50,32 @@ class FitVidTorchModel:
 
 if __name__ == '__main__':
 
-    checkpoint_dir = 'soem path here'
+    checkpoint_dir = '/home/rjahmed/Fitvid_Ferro/fitvid-ferrofluid/checkpoints/PyTorch model checkpoints/3Hz_larger_stochastic/model_epoch230.pt'
     hp_override = {
         'stochastic': True,
-        'rnn_size': 64
+        'rnn_size': 128,
+        'g_dim':64,
+        'has_depth_predictor': False
+        #'num_base_filters':4
     }
     model = FitVidTorchModel(checkpoint_dir, hp_override)
-    batch_size = 200
-    batch = {
-        'video': np.zeros((batch_size, 2, 64, 64, 3)),
-        'actions':  np.zeros((batch_size, 11, 8)),
-    }
-    predictions = model(batch)
-    # shape of predictions: (batch_size, 11, 64, 64, 3)
+    #model is loaded after this line
+
+    startime = datetime.datetime.now()
+    for i in range(0,100):
+
+        batch_size = 200
+        batch = {
+            'video': np.zeros((batch_size, 2, 64, 64, 3)),
+            'actions':  np.zeros((batch_size, 11, 8)),
+        }
+        predictions = model(batch)
+        # shape of predictions: (batch_size, 11, 64, 64, 3)
+    endtime = datetime.datetime.now()
+    runtime = endtime-startime
+    ave_run_time = runtime/100
+    print(ave_run_time)
+
+    print(predictions.shape)
+
 
