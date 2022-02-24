@@ -15,13 +15,15 @@ def get_data_loader(dataset_paths, batch_size, video_len, phase, depth, view):
         "obs": {
             "rgb": [f"{view}_image"],
             "depth": [f"{view}_depth"],
-            "scan": [f"{view}_segmentation_instance"]
+            #"scan": [f"{view}_segmentation_instance"]
+            "scan": [f"{view}_seg"]
         }
     })
 
     all_datasets = []
     for i, dataset_path in enumerate(dataset_paths):
-        obs_keys = (f"{view}_image", f"{view}_segmentation_instance")
+        #obs_keys = (f"{view}_image", f"{view}_segmentation_instance")
+        obs_keys = (f"{view}_image", f"{view}_seg")
         if depth:
             obs_keys = obs_keys + (f"{view}_depth",)
 
@@ -55,7 +57,7 @@ def get_data_loader(dataset_paths, batch_size, video_len, phase, depth, view):
         sampler=None,       # no custom sampling logic (uniform sampling)
         batch_size=batch_size,     
         shuffle=True,
-        num_workers=0,
+        num_workers=2,
         drop_last=True      # don't provide last batch in dataset pass if it's less than 100 in size
     )
     return data_loader
@@ -70,7 +72,8 @@ def load_dataset_robomimic_torch(dataset_path, batch_size, video_len, phase, dep
         data_dict = {
             'video': xs['obs'][f'{view}_image'],
             'actions': xs['actions'],
-            'segmentation': xs['obs'][f'{view}_segmentation_instance']
+            #'segmentation': xs['obs'][f'{view}_segmentation_instance']
+            'segmentation': xs['obs'][f'{view}_seg']
         }
         # zero out the parts of the segmentation which are not assigned label corresponding to object of interest
         # set the object label components to 1
