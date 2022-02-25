@@ -395,7 +395,9 @@ class FitVid(nn.Module):
             depth_pred = depth_pred.view((shape[0], shape[1],) + tuple(depth_pred.shape[1:]))
         else:
             depth_pred = depth_pred
-        depth_pred = 1 - normalize_depth(depth_pred, across_dims=1)
+        #depth_pred = 1 - normalize_depth(depth_pred, across_dims=1)
+        depth_pred = 1.0 / (depth_pred + 1e-10)
+        depth_pred = normalize_depth(depth_pred)
         return depth_pred
 
     def get_input(self, hidden, action, z):
@@ -616,7 +618,6 @@ class FitVid(nn.Module):
 
             if segmentation is not None:
                 sq_err = self.depth_loss(depth_preds, depth_video[:, 1:], reduction='none')
-                print(sq_err)
                 sq_err[mask != 1] = 0
                 upweighted_depth_loss = sq_err.mean()
                 metrics.update({'loss/segmented_depth_mse': upweighted_depth_loss})

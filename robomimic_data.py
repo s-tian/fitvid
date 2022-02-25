@@ -1,5 +1,6 @@
 import jax
 import torch
+import numpy as np
 
 from robomimic.utils.dataset import SequenceDataset
 import robomimic.utils.obs_utils as ObsUtils
@@ -77,9 +78,12 @@ def load_dataset_robomimic_torch(dataset_path, batch_size, video_len, phase, dep
         }
         # zero out the parts of the segmentation which are not assigned label corresponding to object of interest
         # set the object label components to 1
-        object_seg_index = 1
-        data_dict['segmentation'][data_dict['segmentation'] != object_seg_index] = 0
-        data_dict['segmentation'][data_dict['segmentation'] == object_seg_index] = 1
+        object_seg_index = 0 # Seg index is 0 on the iGibson data, and 1 on Mujoco data
+        seg_image = torch.zeros_like(data_dict['segmentation'])
+        seg_image[data_dict['segmentation'] == object_seg_index] = 1
+        seg_image[data_dict['segmentation'] != object_seg_index] = 0
+        data_dict['segmentation'] = seg_image
+
         # segmentation = data_dict['segmentation'][0][0]
         # segmentation = torch.tile(segmentation, (3, 1, 1))
         # sample_image = data_dict['video'][0][0]
@@ -129,11 +133,13 @@ def load_dataset_robomimic(dataset_path, batch_size, video_len, is_train, depth,
 
 if __name__ == '__main__':
     dataset_path = '/viscam/u/stian/perceptual-metrics/robomimic/datasets/lift/mg/image_and_depth.hdf5'
-    
-    dataset = load_dataset_robomimic(dataset_path, 16, 10, True)
-    batch = next(dataset)
-    import ipdb; ipdb.set_trace()
-    
+    dataset_path = '/viscam/u/stian/perceptual-metrics/robosuite/robosuite/models/assets/demonstrations/1644373519_3708425/1644373519_3708425_igibson_obs.hdf5'
+    dataset_path = '/viscam/u/stian/perceptual-metrics/robosuite/robosuite/models/assets/policy_rollouts/pushcenter_osc_position_eval/igibson_obs.hdf5'
+
+    dl, p = load_dataset_robomimic_torch([dataset_path], 16, 10, 'train', depth=False, view='agentview_shift_2')
+    batch = next(iter(dl))
+    p(batch)
+
     #dataloader = get_data_loader(dataset_path, 1, 10, 'train')
     #batch = next(iter(dataloader))
 

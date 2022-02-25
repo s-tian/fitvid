@@ -3,6 +3,7 @@ import os
 import tqdm
 import torch
 import torch.nn.functional as F
+import numpy as np
 
 import midas
 from fitvid.fitvid_torch import dict_to_cuda, normalize_depth
@@ -59,11 +60,15 @@ def prep_batch(batch):
     return images, depth_images
 
 
-def log_preds(folder, preds, epoch, phase):
+def log_preds(folder, rgb_images, true_images, preds, epoch, phase):
     preds = preds.detach().cpu().numpy()
-    for i, pred in enumerate(preds):
+    true_images = true_images.detach().cpu().numpy()
+    rgb_images = rgb_images.detach().cpu().numpy()
+    for i, (rgb_image, pred, timg) in enumerate(zip(rgb_images, preds, true_images)):
         depth_video = depth_to_rgb_im(pred)
-        save_moviepy_gif(list(depth_video), os.path.join(folder, f'{phase}_epoch_{epoch}_pred_{i}'))
+        true_image = depth_to_rgb_im(timg)
+        video = np.concatenate([depth_video, true_image, rgb_image], axis=-2)
+        save_moviepy_gif(list(video), os.path.join(folder, f'{phase}_epoch_{epoch}_pred_{i}'))
 
 
 def main(args):
@@ -85,6 +90,24 @@ def main(args):
         os.makedirs(output_folder)
 
     for epoch in range(args.epochs):
+
+        model.eval()
+        print('Running validation...')
+        for i, batch in enumerate(val_loader):
+            batch = dict_to_cuda(val_prep(batch))
+            traj_length = batch['video'].shape[1]
+            images, depth_images = prep_batch(batch)
+            with torch.no_grad():
+                preds = model(images)
+                preds = torch.nn.functional.interpolate(preds[:, None], size=(64, 64))
+                preds = preds.reshape(-1, traj_length, *preds.shape[1:])
+                preds = 1.0 / (preds + 1e-10)
+            val_loss = loss_fn(preds, depth_images)
+            if i > val_steps_per_epoch:
+                break
+        print(f'Epoch {epoch} validation loss: {val_loss}')
+        log_preds(output_folder, batch['images'], depth_images, preds, epoch, 'val')
+
         model.train()
         for i, batch in tqdm.tqdm(enumerate(train_loader)):
             batch = dict_to_cuda(train_prep(batch))
@@ -94,7 +117,7 @@ def main(args):
             preds = model(images)
             preds = torch.nn.functional.interpolate(preds[:, None], size=(64, 64))
             preds = preds.reshape(-1, traj_length, *preds.shape[1:])
-            preds = 1 - normalize_depth(preds)
+            preds = 1.0 / (preds + 1e-10)
             optimizer.zero_grad()
             loss = loss_fn(preds, depth_images)
             loss.backward()
@@ -103,24 +126,8 @@ def main(args):
                 print(f'Train loss: {loss}')
             if i > train_steps_per_epoch:
                 break
-        log_preds(output_folder, preds, epoch, 'train')
+        log_preds(output_folder, batch['images'], depth_images, preds, epoch, 'train')
         print(f'Epoch {epoch} training loss: {loss}')
-        model.eval()
-        print('Running validation...')
-        for i, batch in enumerate(val_loader):
-            batch = dict_to_cuda(val_prep(batch))
-            images, depth_images = prep_batch(batch)
-            with torch.no_grad():
-                preds = model(images)
-                preds = torch.nn.functional.interpolate(preds[:, None], size=(64, 64))
-                preds = preds.reshape(-1, traj_length, *preds.shape[1:])
-                preds = 1 - normalize_depth(preds)
-            val_loss = loss_fn(preds, depth_images)
-            if i > val_steps_per_epoch:
-                break
-        print(f'Epoch {epoch} validation loss: {val_loss}')
-        log_preds(output_folder, preds, epoch, 'val')
-
         torch.save(model.state_dict(), args.output_file)
 
 if __name__ == '__main__':
