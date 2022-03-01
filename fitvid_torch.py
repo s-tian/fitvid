@@ -63,6 +63,7 @@ flags.DEFINE_float('depth_start_epoch', 0, 'Weight on depth objective.')
 flags.DEFINE_boolean('pretrained_depth_objective', True, 'Instead of using a learned depth model, use a pretrained one.')
 flags.DEFINE_string('depth_model_path', None, 'Path to load pretrained depth model from.')
 flags.DEFINE_boolean('freeze_pretrained', True, 'Whether to freeze the weights of the pretrained depth model.')
+flags.DEFINE_integer('depth_model_size', 256, 'Depth model size.')
 
 # post hoc analysis
 flags.DEFINE_string('re_eval', 'False', 'Re evaluate all available checkpoints saved.')
@@ -307,7 +308,7 @@ class FitVid(nn.Module):
 
     def __init__(self, stage_sizes, z_dim, g_dim, rnn_size, num_base_filters, first_block_shape, expand_decoder,
                  skip_type, n_past, action_conditioned, action_size, is_inference, has_depth_predictor, beta, tv_weight, depth_weight,
-                 pretrained_depth_path, freeze_depth_model, segmentation_loss_weight, segmentation_depth_loss_weight):
+                 pretrained_depth_path, depth_model_size, freeze_depth_model, segmentation_loss_weight, segmentation_depth_loss_weight):
         super(FitVid, self).__init__()
         self.n_past = n_past
         self.action_conditioned = action_conditioned
@@ -318,11 +319,18 @@ class FitVid(nn.Module):
         self.has_depth_predictor = has_depth_predictor
         self.depth_weight = depth_weight
         self.pretrained_depth_path = pretrained_depth_path
+        self.depth_model_size = depth_model_size
         self.freeze_depth_model = freeze_depth_model
         self.segmentation_loss_weight = segmentation_loss_weight
         self.segmentation_depth_loss_weight = segmentation_depth_loss_weight
         self.tv_weight = tv_weight
         self.lpips = piq.LPIPS()
+
+        # depth weight describes how much to weight the depth term relative to the RGB term. The total reconstruction
+        # loss sums up to 1, to balance against the KL divergence term and other auxiliary losses.
+        depth_weight = self.depth_weight / (self.depth_weight + 1)
+
+        self.depth_weight, self.rgb_weight = depth_weight, 1 - depth_weight
 
         if not is_inference:
             if FLAGS.depth_loss == 'norm_mse':
@@ -387,10 +395,15 @@ class FitVid(nn.Module):
         #pred_frame = resize(pred_frame, scale_factors=6) # resize to 384x384
 
         pred_frame = pred_frame
-        pred_frame = torch.nn.Upsample(scale_factor=4)(pred_frame)
+        if self.depth_model_size % pred_frame.shape[-1] != 0:
+            raise ValueError('depth model and frame pred size mismatch!')
+        if self.depth_model_size != pred_frame.shape[-1]:
+            pred_frame = torch.nn.Upsample(scale_factor=pred_frame.shape[-1]//self.depth_model_size)(pred_frame)
         depth_pred = self.depth_head(pred_frame)[:, None].float()
         # normalize to [0, 1]
-        depth_pred = torch.nn.functional.interpolate(depth_pred, size=(64, 64))
+        if self.depth_model_size != pred_frame.shape[-1]:
+            depth_pred = torch.nn.functional.interpolate(depth_pred, size=(64, 64))
+
         if time_axis:
             depth_pred = depth_pred.view((shape[0], shape[1],) + tuple(depth_pred.shape[1:]))
         else:
@@ -489,7 +502,7 @@ class FitVid(nn.Module):
         logvars = torch.stack(logvars, axis=1)
 
         mse = F.mse_loss(preds, video[:, 1:])
-        loss = mse + kld * self.beta
+        loss = self.rgb_weight * mse + kld * self.beta
 
         if self.tv_weight:
             loss = loss + self.tv_weight * tv(preds)
@@ -705,6 +718,7 @@ def main(argv):
                    tv_weight=FLAGS.tv_weight,
                    depth_weight=FLAGS.depth_weight,
                    pretrained_depth_path=FLAGS.depth_model_path,
+                   depth_model_size=FLAGS.depth_model_size,
                    freeze_depth_model=FLAGS.freeze_pretrained,
                    segmentation_loss_weight=FLAGS.segmentation_loss_weight,
                    segmentation_depth_loss_weight=FLAGS.segmentation_depth_loss_weight,

@@ -34,8 +34,8 @@ def load_model(model_name, path):
 
 
 def get_dataloaders(dataset_files, bs, view):
-    train_load = load_dataset_robomimic_torch(dataset_files, batch_size=bs, video_len=12, phase='train', depth=True, view=view)
-    val_load = load_dataset_robomimic_torch(dataset_files, batch_size=bs, video_len=12, phase='valid', depth=True, view=view)
+    train_load = load_dataset_robomimic_torch(dataset_files, batch_size=bs, video_len=10, phase='train', depth=True, view=view)
+    val_load = load_dataset_robomimic_torch(dataset_files, batch_size=bs, video_len=10, phase='valid', depth=True, view=view)
     return train_load, val_load
 
 
@@ -52,10 +52,10 @@ def loss_fn(pred, actual):
     return F.mse_loss(pred, actual)
 
 
-def prep_batch(batch):
+def prep_batch(batch, upsample_factor):
     depth_images = batch['depth_video']
     images = flatten_dims(batch['video'])
-    images = torch.nn.Upsample(scale_factor=4)(images)
+    images = torch.nn.Upsample(scale_factor=upsample_factor)(images)
     images = (images - torch.Tensor([0.485, 0.456, 0.406])[..., None, None].to(images.device)) / (torch.Tensor([0.229, 0.224, 0.225])[..., None, None].to(images.device))
     return images, depth_images
 
@@ -64,7 +64,10 @@ def log_preds(folder, rgb_images, true_images, preds, epoch, phase):
     preds = preds.detach().cpu().numpy()
     true_images = true_images.detach().cpu().numpy()
     rgb_images = rgb_images.detach().cpu().numpy()
+    rgb_images = np.transpose(rgb_images, (0, 1, 3, 4, 2)) * 255
     for i, (rgb_image, pred, timg) in enumerate(zip(rgb_images, preds, true_images)):
+        if i > 10:
+            continue
         depth_video = depth_to_rgb_im(pred)
         true_image = depth_to_rgb_im(timg)
         video = np.concatenate([depth_video, true_image, rgb_image], axis=-2)
@@ -96,7 +99,7 @@ def main(args):
         for i, batch in enumerate(val_loader):
             batch = dict_to_cuda(val_prep(batch))
             traj_length = batch['video'].shape[1]
-            images, depth_images = prep_batch(batch)
+            images, depth_images = prep_batch(batch, args.upsample_factor)
             with torch.no_grad():
                 preds = model(images)
                 preds = torch.nn.functional.interpolate(preds[:, None], size=(64, 64))
@@ -106,14 +109,14 @@ def main(args):
             if i > val_steps_per_epoch:
                 break
         print(f'Epoch {epoch} validation loss: {val_loss}')
-        log_preds(output_folder, batch['images'], depth_images, preds, epoch, 'val')
+        log_preds(output_folder, batch['video'], depth_images, preds, epoch, 'val')
 
         model.train()
         for i, batch in tqdm.tqdm(enumerate(train_loader)):
             batch = dict_to_cuda(train_prep(batch))
             shape = batch['video'].shape
             traj_length = shape[1]
-            images, depth_images = prep_batch(batch)
+            images, depth_images = prep_batch(batch, args.upsample_factor)
             preds = model(images)
             preds = torch.nn.functional.interpolate(preds[:, None], size=(64, 64))
             preds = preds.reshape(-1, traj_length, *preds.shape[1:])
@@ -126,7 +129,7 @@ def main(args):
                 print(f'Train loss: {loss}')
             if i > train_steps_per_epoch:
                 break
-        log_preds(output_folder, batch['images'], depth_images, preds, epoch, 'train')
+        log_preds(output_folder, batch['video'], depth_images, preds, epoch, 'train')
         print(f'Epoch {epoch} training loss: {loss}')
         torch.save(model.state_dict(), args.output_file)
 
@@ -138,6 +141,8 @@ if __name__ == '__main__':
         '--output_file', default='', required=True, help='Where to save final model params')
     parser.add_argument(
         '--view', default='agentview', required=True, help='Camera view to use for training')
+    parser.add_argument(
+        '--upsample_factor', default=4, help='factor to upsample images')
     parser.add_argument(
         '--dataset_files', nargs='+', required=True, help='number of trajectories to run for complete eval')
     parser.add_argument(
