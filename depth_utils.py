@@ -29,12 +29,10 @@ def normalize_depth_npy(t, across_dims=1):
 
 def depth_to_rgb_im(im, cmap=plt.get_cmap('jet_r')):
     # shape = [(T), 1, W, H]
-    # normalize
-    im = normalize_depth_npy(im, across_dims=-4)
     im = np.squeeze(im)
     # convert to rgb using given cmap
     im = cmap(im)[..., :3]
-    return im * 255
+    return (im * 255).astype(np.uint8)
 
 
 def depth_mse_loss(pred, gt, reduction='mean'):

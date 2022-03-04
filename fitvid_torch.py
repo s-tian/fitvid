@@ -18,7 +18,7 @@ import piq
 from fitvid import robomimic_data
 from fitvid.depth_utils import normalize_depth, depth_to_rgb_im, depth_mse_loss, DEFAULT_WEIGHT_LOCATIONS, \
                                save_moviepy_gif, dict_to_cuda
-from fitvid.pytorch_metrics import psnr, lpips, ssim, tv
+from fitvid.pytorch_metrics import psnr, lpips, ssim, tv, PolicyFeatureL2Metric
 
 FLAGS = flags.FLAGS
 
@@ -306,24 +306,23 @@ class ModularDecoder(nn.Module):
 class FitVid(nn.Module):
     """FitVid video predictor."""
 
-    def __init__(self, stage_sizes, z_dim, g_dim, rnn_size, num_base_filters, first_block_shape, expand_decoder,
-                 skip_type, n_past, action_conditioned, action_size, is_inference, has_depth_predictor, beta, tv_weight, depth_weight,
-                 pretrained_depth_path, depth_model_size, freeze_depth_model, segmentation_loss_weight, segmentation_depth_loss_weight):
+    def __init__(self, **kwargs):
         super(FitVid, self).__init__()
-        self.n_past = n_past
-        self.action_conditioned = action_conditioned
-        self.beta = beta
+        self.n_past = kwargs['n_past']
+        self.action_conditioned = kwargs['action_conditioned']
+        self.beta = kwargs['beta']
         self.stochastic = True
-        self.is_inference = is_inference
-        self.skip_type = skip_type
-        self.has_depth_predictor = has_depth_predictor
-        self.depth_weight = depth_weight
-        self.pretrained_depth_path = pretrained_depth_path
-        self.depth_model_size = depth_model_size
-        self.freeze_depth_model = freeze_depth_model
-        self.segmentation_loss_weight = segmentation_loss_weight
-        self.segmentation_depth_loss_weight = segmentation_depth_loss_weight
-        self.tv_weight = tv_weight
+        self.is_inference = kwargs['is_inference']
+        self.skip_type = kwargs['skip_type']
+        self.has_depth_predictor = kwargs['has_depth_predictor']
+        self.depth_weight = kwargs['depth_weight']
+        self.pretrained_depth_path = kwargs['pretrained_depth_path']
+        self.depth_model_size = kwargs['depth_model_size']
+        self.freeze_depth_model = kwargs['freeze_depth_model']
+        self.segmentation_loss_weight = kwargs['segmentation_loss_weight']
+        self.segmentation_depth_loss_weight = kwargs['segmentation_depth_loss_weight']
+        self.policy_feature_weight = kwargs['policy_feature_weight']
+        self.tv_weight = kwargs['tv_weight']
         self.lpips = piq.LPIPS()
 
         # depth weight describes how much to weight the depth term relative to the RGB term. The total reconstruction
@@ -332,21 +331,21 @@ class FitVid(nn.Module):
 
         self.depth_weight, self.rgb_weight = depth_weight, 1 - depth_weight
 
-        if not is_inference:
+        if not self.is_inference:
             if FLAGS.depth_loss == 'norm_mse':
-                self.depth_loss = depth_mse_loss
+                self.depth_loss = F.mse_loss
             else:
                 raise NotImplementedError
 
-        first_block_shape = [first_block_shape[-1]] + first_block_shape[:2]
-        self.encoder = ModularEncoder(stage_sizes=stage_sizes, output_size=g_dim, num_base_filters=num_base_filters)
-        self.prior = MultiGaussianLSTM(input_size=g_dim, output_size=z_dim, hidden_size=rnn_size, num_layers=1)
-        self.posterior = MultiGaussianLSTM(input_size=g_dim, output_size=z_dim, hidden_size=rnn_size, num_layers=1)
+        first_block_shape = [kwargs['first_block_shape'][-1]] + kwargs['first_block_shape'][:2]
+        self.encoder = ModularEncoder(stage_sizes=kwargs['stage_sizes'], output_size=kwargs['g_dim'], num_base_filters=kwargs['num_base_filters'])
+        self.prior = MultiGaussianLSTM(input_size=kwargs['g_dim'], output_size=kwargs['z_dim'], hidden_size=kwargs['rnn_size'], num_layers=1)
+        self.posterior = MultiGaussianLSTM(input_size=kwargs['g_dim'], output_size=kwargs['z_dim'], hidden_size=kwargs['rnn_size'], num_layers=1)
 
-        self.decoder = ModularDecoder(first_block_shape=first_block_shape, input_size=g_dim, stage_sizes=stage_sizes,
-                                      num_base_filters=num_base_filters, skip_type=skip_type, expand=expand_decoder)
+        self.decoder = ModularDecoder(first_block_shape=first_block_shape, input_size=kwargs['g_dim'], stage_sizes=kwargs['stage_sizes'],
+                                      num_base_filters=kwargs['num_base_filters'], skip_type=kwargs['skip_type'], expand=kwargs['expand_decoder'])
 
-        if has_depth_predictor:
+        if self.has_depth_predictor:
             #assert FLAGS.pretrained_depth_objective, 'Only pretrained depth objective available right now'
             from midas.dpt_depth import DPTDepthModel
             from midas.midas_net import MidasNet
@@ -383,8 +382,8 @@ class FitVid(nn.Module):
             self.register_buffer('depth_head_mean', torch.Tensor([0.485, 0.456, 0.406])[..., None, None])
             self.register_buffer('depth_head_std', torch.Tensor([0.229, 0.224, 0.225])[..., None, None])
 
-        input_size = self.get_input_size(g_dim, action_size, z_dim)
-        self.frame_predictor = MultiGaussianLSTM(input_size=input_size, output_size=g_dim, hidden_size=rnn_size, num_layers=2)
+        input_size = self.get_input_size(kwargs['g_dim'], kwargs['action_size'], kwargs['z_dim'])
+        self.frame_predictor = MultiGaussianLSTM(input_size=input_size, output_size=kwargs['g_dim'], hidden_size=kwargs['rnn_size'], num_layers=2)
     
     def predict_depth(self, pred_frame, time_axis=True):
         if time_axis:
@@ -392,9 +391,7 @@ class FitVid(nn.Module):
             pred_frame = pred_frame.view(
                 (shape[0] * shape[1],) + shape[2:])  # collapse batch*time dims [b0t0, b0t1, b0t2... b1t0, b1t1, b1t2...]
         pred_frame = (pred_frame - self.depth_head_mean) / self.depth_head_std # normalize as done for pretrained MiDaS
-        #pred_frame = resize(pred_frame, scale_factors=6) # resize to 384x384
 
-        pred_frame = pred_frame
         if self.depth_model_size % pred_frame.shape[-1] != 0:
             raise ValueError('depth model and frame pred size mismatch!')
         if self.depth_model_size != pred_frame.shape[-1]:
@@ -409,8 +406,8 @@ class FitVid(nn.Module):
         else:
             depth_pred = depth_pred
         #depth_pred = 1 - normalize_depth(depth_pred, across_dims=1)
-        depth_pred = 1.0 / (depth_pred + 1e-10)
-        depth_pred = normalize_depth(depth_pred)
+        #depth_pred = 1.0 / (depth_pred + 1e-10)
+        #depth_pred = normalize_depth(depth_pred)
         return depth_pred
 
     def get_input(self, hidden, action, z):
@@ -904,6 +901,7 @@ def main(argv):
                 wandb_log.update({f'video_depth_train_{i}': wandb.Video(np.moveaxis(vid, 3, 1), fps=4, format='gif')})
                 save_moviepy_gif(list(vid), os.path.join(FLAGS.output_dir, f'video_depth_train_epoch{epoch}_{i}'), fps=5)
                 print('Saved train depth vid for the epoch')
+
             wandb.log(wandb_log)
 
 

@@ -9,6 +9,7 @@ import midas
 from fitvid.fitvid_torch import dict_to_cuda, normalize_depth
 from fitvid.robomimic_data import load_dataset_robomimic_torch
 from fitvid.depth_utils import normalize_depth, depth_to_rgb_im, save_moviepy_gif, DEFAULT_WEIGHT_LOCATIONS
+from perceptual_metrics.utils import save_torch_img
 
 
 def load_model(model_name, path):
@@ -29,7 +30,7 @@ def load_model(model_name, path):
         from midas.midas_net_custom import MidasNet_small
         depth_model = MidasNet_small(checkpoint,
                                      features=64, backbone="efficientnet_lite3", exportable=True,
-                                     non_negative=True, blocks={'expand': True})
+                                     non_negative=False, blocks={'expand': True})
     return depth_model
 
 
@@ -47,16 +48,41 @@ def flatten_dims(img):
 
 
 def loss_fn(pred, actual):
-    pred = normalize_depth(pred, 1)
-    actual = normalize_depth(actual, 1)
+    # pred = normalize_depth(pred, 1)
+    # actual = normalize_depth(actual, 1)
     return F.mse_loss(pred, actual)
+
+
+def scale_invariant_loss(pred, actual):
+    mses = []
+    for p, gt in zip(pred, actual):
+        # invert ground truth
+        actual = 1.0 / (actual + 1e-10)
+        # align prediction based on least squares criterion
+        total_size = np.prod(p.shape)
+        import ipdb; ipdb.set_trace()
+        inv_term = torch.tensor(
+                [[ (p**2).sum(), p.sum()],
+                 [  p.sum(),     total_size]]
+            ).to(p)
+        inv_term = torch.inverse(inv_term)
+        least_squares = torch.mm(inv_term, torch.tensor([p*gt.sum(), gt.sum()]).to(p))
+
+        p_aligned = p * least_squares[0] + least_squares[1]
+        # invert aligned pred to get depth
+        p_aligned_depth = 1.0 / (p_aligned + 1e-10)
+        mse = F.mse_loss(pred, actual)
+        mses.append(mse)
+    return torch.stack(mse).mean()
 
 
 def prep_batch(batch, upsample_factor):
     depth_images = batch['depth_video']
     images = flatten_dims(batch['video'])
-    images = torch.nn.Upsample(scale_factor=upsample_factor)(images)
+    if upsample_factor != 1:
+        images = torch.nn.Upsample(scale_factor=upsample_factor)(images)
     images = (images - torch.Tensor([0.485, 0.456, 0.406])[..., None, None].to(images.device)) / (torch.Tensor([0.229, 0.224, 0.225])[..., None, None].to(images.device))
+    assert 0 <= depth_images.min() < depth_images.max() <= 1, 'Depth image found which was OOB!'
     return images, depth_images
 
 
@@ -80,7 +106,8 @@ def main(args):
     train_loader, val_loader = get_dataloaders(args.dataset_files, args.batch_size, args.view)
     train_loader, train_prep = train_loader
     val_loader, val_prep = val_loader
-    print(len(train_loader))
+    # loss_fn = scale_invariant_loss
+    print(f'Train loader has length {len(train_loader)}')
 
     train_steps_per_epoch = 300
     val_steps_per_epoch = 24
@@ -97,14 +124,17 @@ def main(args):
         model.eval()
         print('Running validation...')
         for i, batch in enumerate(val_loader):
+            # save_torch_img(batch['obs']['agentview_shift_2_image'][0][0], 'test_image')
             batch = dict_to_cuda(val_prep(batch))
             traj_length = batch['video'].shape[1]
             images, depth_images = prep_batch(batch, args.upsample_factor)
             with torch.no_grad():
                 preds = model(images)
-                preds = torch.nn.functional.interpolate(preds[:, None], size=(64, 64))
+                if args.upsample_factor != 1:
+                    preds = torch.nn.functional.interpolate(preds[:, None], size=(64, 64))
                 preds = preds.reshape(-1, traj_length, *preds.shape[1:])
-                preds = 1.0 / (preds + 1e-10)
+                # preds = 1.0 / (preds + 1e-10) + 0.5
+                # preds = 1 - preds
             val_loss = loss_fn(preds, depth_images)
             if i > val_steps_per_epoch:
                 break
@@ -113,17 +143,21 @@ def main(args):
 
         model.train()
         for i, batch in tqdm.tqdm(enumerate(train_loader)):
+            # save_torch_img(batch['obs']['agentview_shift_2_image'][0][0], 'test_image')
             batch = dict_to_cuda(train_prep(batch))
             shape = batch['video'].shape
             traj_length = shape[1]
             images, depth_images = prep_batch(batch, args.upsample_factor)
             preds = model(images)
-            preds = torch.nn.functional.interpolate(preds[:, None], size=(64, 64))
+            if args.upsample_factor != 1:
+                preds = torch.nn.functional.interpolate(preds[:, None], size=(64, 64))
             preds = preds.reshape(-1, traj_length, *preds.shape[1:])
-            preds = 1.0 / (preds + 1e-10)
+            # preds = 1 - preds
+            # preds = 1.0 / (preds + 1e-10) + 0.5
             optimizer.zero_grad()
             loss = loss_fn(preds, depth_images)
             loss.backward()
+            torch.nn.utils.clip_grad_norm(model.parameters(), 1)
             optimizer.step()
             if i % 100 == 0:
                 print(f'Train loss: {loss}')
