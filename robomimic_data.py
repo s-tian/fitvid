@@ -7,7 +7,7 @@ import robomimic.utils.obs_utils as ObsUtils
 from torch.utils.data import DataLoader, ConcatDataset
 
 
-def get_data_loader(dataset_paths, batch_size, video_len, phase, depth, view):
+def get_data_loader(dataset_paths, batch_size, video_len, phase, depth, view, seg=True):
     """
     Get a data loader to sample batches of data.
     """
@@ -24,7 +24,10 @@ def get_data_loader(dataset_paths, batch_size, video_len, phase, depth, view):
     all_datasets = []
     for i, dataset_path in enumerate(dataset_paths):
         #obs_keys = (f"{view}_image", f"{view}_segmentation_instance")
-        obs_keys = (f"{view}_image", f"{view}_seg")
+        if seg:
+            obs_keys = (f"{view}_image", f"{view}_seg")
+        else:
+            obs_keys = (f"{view}_image")
         if depth:
             obs_keys = obs_keys + (f"{view}_depth",)
 
@@ -64,33 +67,38 @@ def get_data_loader(dataset_paths, batch_size, video_len, phase, depth, view):
     return data_loader
 
 
-def load_dataset_robomimic_torch(dataset_path, batch_size, video_len, phase, depth, view='agentview'):
+def load_dataset_robomimic_torch(dataset_path, batch_size, video_len, phase, depth, view='agentview', seg=True):
     assert phase in ['train', 'valid'], f'Phase is not one of the acceptable values! Got {phase}'
 
-    loader = get_data_loader(dataset_path, batch_size, video_len, phase, depth, view)
+    loader = get_data_loader(dataset_path, batch_size, video_len, phase, depth, view, seg)
 
     def prepare_data(xs):
         data_dict = {
             'video': xs['obs'][f'{view}_image'],
             'actions': xs['actions'],
             #'segmentation': xs['obs'][f'{view}_segmentation_instance']
-            'segmentation': xs['obs'][f'{view}_seg']
         }
-        # zero out the parts of the segmentation which are not assigned label corresponding to object of interest
-        # set the object label components to 1
-        object_seg_index = 0 # Seg index is 0 on the iGibson data, and 1 on Mujoco data
-        seg_image = torch.zeros_like(data_dict['segmentation'])
-        seg_image[data_dict['segmentation'] == object_seg_index] = 1
-        seg_image[data_dict['segmentation'] != object_seg_index] = 0
-        data_dict['segmentation'] = seg_image
+        if f'{view}_seg' in xs['obs']:
+            data_dict['segmentation'] = xs['obs'][f'{view}_seg']
+            # zero out the parts of the segmentation which are not assigned label corresponding to object of interest
+            # set the object label components to 1
+            object_seg_index = 0 # Seg index is 0 on the iGibson data, and 1 on Mujoco data
+            arm_seg_index = 1 # Seg index is 0 on the iGibson data, and 1 on Mujoco data
+            seg_image = torch.zeros_like(data_dict['segmentation'])
+            seg_image[data_dict['segmentation'] == object_seg_index] = 1
+            seg_image[data_dict['segmentation'] == arm_seg_index] = 2
+            not_either_mask = ~((data_dict['segmentation'] == object_seg_index) | (data_dict['segmentation'] == arm_seg_index))
+            seg_image[not_either_mask] = 0
+            data_dict['segmentation'] = seg_image
 
-        # segmentation = data_dict['segmentation'][0][0]
-        # segmentation = torch.tile(segmentation, (3, 1, 1))
-        # sample_image = data_dict['video'][0][0]
-        # sample_image[segmentation != 1] = 0
-        # sample_image[segmentation == 1] = 255
-        # from perceptual_metrics.utils import save_np_img
-        # save_np_img(np.transpose(sample_image.cpu().numpy(), (1, 2, 0)).astype(np.uint8), dataset_path[0].split('/')[-1])
+            # segmentation = data_dict['segmentation'][0][0]
+            # segmentation = torch.tile(segmentation, (3, 1, 1))
+            # sample_image = data_dict['video'][0][0]
+            # sample_image[segmentation != 1] = 0
+            # sample_image[segmentation == 1] = 255
+            # from perceptual_metrics.utils import save_np_img
+            # save_np_img(np.transpose(sample_image.cpu().numpy(), (1, 2, 0)).astype(np.uint8), dataset_path[0].split('/')[-1])
+            # save_np_img(np.transpose(data_dict['video'][0][0].cpu().numpy(), (1, 2, 0)).astype(np.uint8), dataset_path[0].split('/')[-1] + 'rgb')
 
         if depth:
             data_dict['depth_video'] = xs['obs'][f'{view}_depth']

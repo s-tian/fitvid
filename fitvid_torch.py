@@ -31,6 +31,7 @@ flags.DEFINE_integer('num_epochs', 1000, 'Number of steps to train for.')
 flags.DEFINE_float('beta', 1e-4, 'Weight on KL.')
 flags.DEFINE_float('tv_weight', 0.0, 'Weight on TV loss.')
 flags.DEFINE_string('data_in_gpu', 'True', 'whether to put data in GPU, or RAM')
+flags.DEFINE_boolean('has_segmentation', True, 'Does dataset have segmentation masks')
 flags.DEFINE_float('segmentation_loss_weight', 0, 'Extra weight on object component of image.')
 flags.DEFINE_float('segmentation_depth_loss_weight', 0, 'Extra weight on object component of depth image.')
 flags.DEFINE_boolean('multistep', False, 'Multi-step training.') # changed
@@ -64,6 +65,10 @@ flags.DEFINE_boolean('pretrained_depth_objective', True, 'Instead of using a lea
 flags.DEFINE_string('depth_model_path', None, 'Path to load pretrained depth model from.')
 flags.DEFINE_boolean('freeze_pretrained', True, 'Whether to freeze the weights of the pretrained depth model.')
 flags.DEFINE_integer('depth_model_size', 256, 'Depth model size.')
+
+# policy feature objective
+flags.DEFINE_float('policy_feature_weight', 0.0, 'Weight on policy feature loss.')
+flags.DEFINE_string('policy_feature_path', '', 'Path to expert policy')
 
 # post hoc analysis
 flags.DEFINE_string('re_eval', 'False', 'Re evaluate all available checkpoints saved.')
@@ -322,6 +327,7 @@ class FitVid(nn.Module):
         self.segmentation_loss_weight = kwargs['segmentation_loss_weight']
         self.segmentation_depth_loss_weight = kwargs['segmentation_depth_loss_weight']
         self.policy_feature_weight = kwargs['policy_feature_weight']
+        self.policy_feature_path = kwargs.get('policy_feature_path', '')
         self.tv_weight = kwargs['tv_weight']
         self.lpips = piq.LPIPS()
 
@@ -382,9 +388,15 @@ class FitVid(nn.Module):
             self.register_buffer('depth_head_mean', torch.Tensor([0.485, 0.456, 0.406])[..., None, None])
             self.register_buffer('depth_head_std', torch.Tensor([0.229, 0.224, 0.225])[..., None, None])
 
+        if self.policy_feature_path:
+            self.policy_feature_metric = PolicyFeatureL2Metric(self.policy_feature_path, 'fc0')
+        else:
+            assert self.policy_feature_weight == 0, 'Policy feature weight is nonzero but there was no policy path specified!'
+            print('No policy feature path provided, not using that metric!')
+            self.policy_feature_metric = None
         input_size = self.get_input_size(kwargs['g_dim'], kwargs['action_size'], kwargs['z_dim'])
         self.frame_predictor = MultiGaussianLSTM(input_size=input_size, output_size=kwargs['g_dim'], hidden_size=kwargs['rnn_size'], num_layers=2)
-    
+
     def predict_depth(self, pred_frame, time_axis=True):
         if time_axis:
             shape = pred_frame.shape
@@ -445,12 +457,19 @@ class FitVid(nn.Module):
 
     def compute_metrics(self, vid1, vid2):
         with torch.no_grad():
-            return {
+            metrics = {
                 'metrics/psnr': psnr(vid1, vid2),
                 'metrics/lpips': lpips(self.lpips, vid1, vid2),
                 'metrics/tv': tv(vid1),
                 'metrics/ssim': ssim(vid1, vid2),
             }
+            if self.policy_feature_metric:
+                action_mse, feature_mse = self.policy_feature_metric(vid1, vid2)
+                metrics.update({
+                    'metrics/action_mse': action_mse,
+                    'metrics/policy_features': feature_mse,
+                })
+            return metrics
 
     def calc_loss_helper(self, video, actions, hidden, skips, posterior, prior, frame_predictor, depth=None,
                          segmentation=None, compute_metrics=False):
@@ -503,6 +522,11 @@ class FitVid(nn.Module):
 
         if self.tv_weight:
             loss = loss + self.tv_weight * tv(preds)
+        if self.policy_feature_weight:
+            policy_loss = self.policy_feature_metric(preds, video[:, 1:])[1]
+            print(loss)
+            print(policy_loss)
+            loss = loss + self.policy_feature_weight * policy_loss
 
         if segmentation is not None:
             sq_err = (preds - video[:, 1:]) ** 2
@@ -719,6 +743,8 @@ def main(argv):
                    freeze_depth_model=FLAGS.freeze_pretrained,
                    segmentation_loss_weight=FLAGS.segmentation_loss_weight,
                    segmentation_depth_loss_weight=FLAGS.segmentation_depth_loss_weight,
+                   policy_feature_path=FLAGS.policy_feature_path,
+                   policy_feature_weight=FLAGS.policy_feature_weight
                    )
     NGPU = torch.cuda.device_count()
     print('CUDA available devices: ', NGPU)
@@ -734,10 +760,10 @@ def main(argv):
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     if FLAGS.debug:
         # hack to make data loading and training faster
-        data_loader, prep_data = load_data(FLAGS.dataset_file, data_type='train', depth=FLAGS.pretrained_depth_objective)
+        data_loader, prep_data = load_data(FLAGS.dataset_file, data_type='train', depth=FLAGS.pretrained_depth_objective, seg=FLAGS.has_segmentation)
     else:
-        data_loader, prep_data = load_data(FLAGS.dataset_file, data_type='train', depth=FLAGS.pretrained_depth_objective)
-    test_data_loader, prep_data_test = load_data(FLAGS.dataset_file, data_type='valid', depth=FLAGS.pretrained_depth_objective)
+        data_loader, prep_data = load_data(FLAGS.dataset_file, data_type='train', depth=FLAGS.pretrained_depth_objective, seg=FLAGS.has_segmentation)
+    test_data_loader, prep_data_test = load_data(FLAGS.dataset_file, data_type='valid', depth=FLAGS.pretrained_depth_objective, seg=FLAGS.has_segmentation)
 
     wandb.init(
         project='perceptual-metrics',
