@@ -53,6 +53,7 @@ flags.DEFINE_integer('save_freq', 10, 'number of steps between checkpoints')
 flags.DEFINE_boolean('wandb_online', None, 'Use wandb online mode (probably should disable on cluster)')
 
 # Data
+flags.DEFINE_integer('action_size', 4, 'Action size.') #
 flags.DEFINE_spaceseplist('dataset_file', [], 'Dataset to load.')
 flags.DEFINE_string('camera_view', 'agentview', 'Camera view of data to load. Default is "agentview".')
 
@@ -694,9 +695,9 @@ class FitVid(nn.Module):
         print(f'Loaded checkpoint {path}')
 
 
-def load_data(dataset_files, data_type='train', depth=False):
+def load_data(dataset_files, data_type='train', depth=False, seg=True):
     video_len = FLAGS.n_past + FLAGS.n_future
-    return robomimic_data.load_dataset_robomimic_torch(dataset_files, FLAGS.batch_size, video_len, data_type, depth, view=FLAGS.camera_view)
+    return robomimic_data.load_dataset_robomimic_torch(dataset_files, FLAGS.batch_size, video_len, data_type, depth, view=FLAGS.camera_view, seg=seg)
 
 
 def get_most_recent_checkpoint(dir):
@@ -731,7 +732,7 @@ def main(argv):
                    skip_type=FLAGS.skip_type,
                    n_past=FLAGS.n_past,
                    action_conditioned=eval(FLAGS.action_conditioned),
-                   action_size=4, # hardcode for now
+                   action_size=FLAGS.action_size, # hardcode for now
                    is_inference=False,
                    has_depth_predictor=FLAGS.pretrained_depth_objective,
                    expand_decoder=FLAGS.expand,

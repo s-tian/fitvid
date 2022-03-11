@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
+import torch
 
 DEFAULT_WEIGHT_LOCATIONS = {
     'dpt': '/viscam/u/stian/perceptual-metrics/MiDaS/weights/dpt_hybrid-midas-501f0c75.pt',
@@ -46,4 +47,5 @@ def save_moviepy_gif(obs_list, name, fps=5):
 
 
 def dict_to_cuda(d):
-    return {k: v.cuda() for k, v in d.items()}
+    # turn all pytorch tensors into cuda tensors, leave all other objects along
+    return {k: v.cuda() if torch.is_tensor(v) else v for k, v in d.items()}

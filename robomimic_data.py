@@ -7,14 +7,22 @@ import robomimic.utils.obs_utils as ObsUtils
 from torch.utils.data import DataLoader, ConcatDataset
 
 
+def get_image_name(cam):
+    if not cam:
+        return 'image'  # for the real world datasets
+    else:
+        return f'{cam}_image'
+
+
 def get_data_loader(dataset_paths, batch_size, video_len, phase, depth, view, seg=True):
     """
     Get a data loader to sample batches of data.
     """
+    imageview_name = get_image_name(view)
 
     ObsUtils.initialize_obs_utils_with_obs_specs({
         "obs": {
-            "rgb": [f"{view}_image"],
+            "rgb": [imageview_name],
             "depth": [f"{view}_depth"],
             #"scan": [f"{view}_segmentation_instance"]
             "scan": [f"{view}_seg"]
@@ -25,9 +33,9 @@ def get_data_loader(dataset_paths, batch_size, video_len, phase, depth, view, se
     for i, dataset_path in enumerate(dataset_paths):
         #obs_keys = (f"{view}_image", f"{view}_segmentation_instance")
         if seg:
-            obs_keys = (f"{view}_image", f"{view}_seg")
+            obs_keys = (imageview_name, f"{view}_seg")
         else:
-            obs_keys = (f"{view}_image")
+            obs_keys = (imageview_name, )
         if depth:
             obs_keys = obs_keys + (f"{view}_depth",)
 
@@ -74,7 +82,7 @@ def load_dataset_robomimic_torch(dataset_path, batch_size, video_len, phase, dep
 
     def prepare_data(xs):
         data_dict = {
-            'video': xs['obs'][f'{view}_image'],
+            'video': xs['obs'][get_image_name(view)],
             'actions': xs['actions'],
             #'segmentation': xs['obs'][f'{view}_segmentation_instance']
         }
@@ -90,16 +98,8 @@ def load_dataset_robomimic_torch(dataset_path, batch_size, video_len, phase, dep
             not_either_mask = ~((data_dict['segmentation'] == object_seg_index) | (data_dict['segmentation'] == arm_seg_index))
             seg_image[not_either_mask] = 0
             data_dict['segmentation'] = seg_image
-
-            # segmentation = data_dict['segmentation'][0][0]
-            # segmentation = torch.tile(segmentation, (3, 1, 1))
-            # sample_image = data_dict['video'][0][0]
-            # sample_image[segmentation != 1] = 0
-            # sample_image[segmentation == 1] = 255
-            # from perceptual_metrics.utils import save_np_img
-            # save_np_img(np.transpose(sample_image.cpu().numpy(), (1, 2, 0)).astype(np.uint8), dataset_path[0].split('/')[-1])
-            # save_np_img(np.transpose(data_dict['video'][0][0].cpu().numpy(), (1, 2, 0)).astype(np.uint8), dataset_path[0].split('/')[-1] + 'rgb')
-
+        else:
+            data_dict['segmentation'] = None
         if depth:
             data_dict['depth_video'] = xs['obs'][f'{view}_depth']
         return data_dict
