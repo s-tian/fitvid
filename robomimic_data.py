@@ -1,10 +1,11 @@
-import jax
+# import jax
 import torch
 import numpy as np
 
 from robomimic.utils.dataset import SequenceDataset
 import robomimic.utils.obs_utils as ObsUtils
 from torch.utils.data import DataLoader, ConcatDataset
+from torchvision.transforms import Resize
 
 
 def get_image_name(cam):
@@ -14,7 +15,7 @@ def get_image_name(cam):
         return f'{cam}_image'
 
 
-def get_data_loader(dataset_paths, batch_size, video_len, phase, depth, view, seg=True):
+def get_data_loader(dataset_paths, batch_size, video_len, video_dims, phase, depth, view, cache_mode='lowdim', seg=True):
     """
     Get a data loader to sample batches of data.
     """
@@ -54,10 +55,11 @@ def get_data_loader(dataset_paths, batch_size, video_len, phase, depth, view, se
             pad_seq_length=False,            # pad last obs per trajectory to ensure all sequences are sampled
             get_pad_mask=False,
             goal_mode=None,
-            hdf5_cache_mode="low_dim",          # cache dataset in memory to avoid repeated file i/o
+            hdf5_cache_mode=cache_mode,          # cache dataset in memory to avoid repeated file i/o
             hdf5_use_swmr=True,
             hdf5_normalize_obs=False,
             filter_by_attribute=phase,       # filter either train or validation data
+            image_size=video_dims,
         )
         all_datasets.append(dataset)
         print(f"\n============= Created Dataset {i+1} out of {len(dataset_paths)} =============")
@@ -70,15 +72,15 @@ def get_data_loader(dataset_paths, batch_size, video_len, phase, depth, view, se
         batch_size=batch_size,     
         shuffle=True,
         num_workers=2,
-        drop_last=True      # don't provide last batch in dataset pass if it's less than 100 in size
+        drop_last=True,      # don't provide last batch in dataset pass if it's less than 100 in size
     )
     return data_loader
 
 
-def load_dataset_robomimic_torch(dataset_path, batch_size, video_len, phase, depth, view='agentview', seg=True):
+def load_dataset_robomimic_torch(dataset_path, batch_size, video_len, video_dims, phase, depth, view='agentview', cache_mode='lowdim', seg=True):
     assert phase in ['train', 'valid'], f'Phase is not one of the acceptable values! Got {phase}'
 
-    loader = get_data_loader(dataset_path, batch_size, video_len, phase, depth, view, seg)
+    loader = get_data_loader(dataset_path, batch_size, video_len, video_dims, phase, depth, view, cache_mode, seg)
 
     def prepare_data(xs):
         data_dict = {
@@ -102,6 +104,7 @@ def load_dataset_robomimic_torch(dataset_path, batch_size, video_len, phase, dep
             data_dict['segmentation'] = None
         if depth:
             data_dict['depth_video'] = xs['obs'][f'{view}_depth']
+
         return data_dict
 
     return loader, prepare_data
@@ -139,6 +142,7 @@ def load_dataset_robomimic(dataset_path, batch_size, video_len, is_train, depth,
     iterable = map(prepare_data, iterable)
     return iterable
 
+
 if __name__ == '__main__':
     dataset_path = '/viscam/u/stian/perceptual-metrics/robomimic/datasets/lift/mg/image_and_depth.hdf5'
     dataset_path = '/viscam/u/stian/perceptual-metrics/robosuite/robosuite/models/assets/demonstrations/1644373519_3708425/1644373519_3708425_igibson_obs.hdf5'
@@ -151,4 +155,3 @@ if __name__ == '__main__':
     #dataloader = get_data_loader(dataset_path, 1, 10, 'train')
     #batch = next(iter(dataloader))
 
-    

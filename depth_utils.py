@@ -36,8 +36,23 @@ def depth_to_rgb_im(im, cmap=plt.get_cmap('jet_r')):
     return (im * 255).astype(np.uint8)
 
 
-def depth_mse_loss(pred, gt, reduction='mean'):
-    return F.mse_loss(normalize_depth(pred, across_dims=1), normalize_depth(gt, across_dims=1), reduction=reduction)
+def mse_loss(a, b, reduce_batch=True):
+    if reduce_batch:
+        return ((a - b) ** 2).mean()
+    else:
+        reduce_dims = tuple(range(len(a.shape)))
+        return ((a - b) ** 2).mean(dim=reduce_dims[1:])
+
+
+def test_mse_loss():
+    t1, t2 = torch.randn((30, 20, 10)), torch.randn((30, 20, 10))
+    my_mse = mse_loss(t1, t2, reduce_batch=True)
+    torch_mse = torch.nn.functional.mse_loss(t1, t2)
+    print(f'Mine: {my_mse}, nn.Functional: {torch_mse}')
+    assert torch.allclose(my_mse, torch_mse), "Reducing all dimensions doesn't match"
+    per_sample_mse = mse_loss(t1, t2, reduce_batch=False)
+    assert torch.allclose(torch_mse, per_sample_mse.mean()), 'Not reducing yields different results'
+    print(f'Mine: {per_sample_mse.mean()}, nn.Functional: {torch_mse}')
 
 
 def save_moviepy_gif(obs_list, name, fps=5):
@@ -46,6 +61,25 @@ def save_moviepy_gif(obs_list, name, fps=5):
     clip.write_gif(f'{name}.gif', fps=fps)
 
 
+def resize_tensor(t, dims):
+    h, w = dims
+    if t.shape[-2] == h and t.shape[-1] == w:
+        return t
+    else:
+        # uses Bilinear interpolation by default, use antialiasing
+        orig_shape = tuple(t.shape[:-3])
+        img_shape = tuple(t.shape[-3:])
+        t = torch.reshape(t, (-1,) + img_shape)
+        t = Resize(dims, antialias=True)(t)
+        t = torch.reshape(t, orig_shape + (img_shape[0],) + tuple(dims))
+        return t
+
+
 def dict_to_cuda(d):
     # turn all pytorch tensors into cuda tensors, leave all other objects along
-    return {k: v.cuda() if torch.is_tensor(v) else v for k, v in d.items()}
+    d = {k: v.cuda() if torch.is_tensor(v) else v for k, v in d.items()}
+    return d
+
+
+if __name__ == '__main__':
+    test_mse_loss()

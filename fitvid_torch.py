@@ -16,8 +16,8 @@ import wandb
 import piq
 
 from fitvid import robomimic_data
-from fitvid.depth_utils import normalize_depth, depth_to_rgb_im, depth_mse_loss, DEFAULT_WEIGHT_LOCATIONS, \
-                               save_moviepy_gif, dict_to_cuda
+from fitvid.depth_utils import normalize_depth, depth_to_rgb_im, DEFAULT_WEIGHT_LOCATIONS, \
+                               save_moviepy_gif, dict_to_cuda, mse_loss
 from fitvid.pytorch_metrics import psnr, lpips, ssim, tv, PolicyFeatureL2Metric
 
 FLAGS = flags.FLAGS
@@ -55,7 +55,9 @@ flags.DEFINE_boolean('wandb_online', None, 'Use wandb online mode (probably shou
 # Data
 flags.DEFINE_integer('action_size', 4, 'Action size.') #
 flags.DEFINE_spaceseplist('dataset_file', [], 'Dataset to load.')
+flags.DEFINE_string('cache_mode', 'lowdim', 'Dataset cache mode')
 flags.DEFINE_string('camera_view', 'agentview', 'Camera view of data to load. Default is "agentview".')
+flags.DEFINE_list('image_size', [], 'H, W of images')
 
 # depth objective
 flags.DEFINE_boolean('depth_objective', False, 'Use depth image decoding as a auxiliary objective.')
@@ -340,7 +342,7 @@ class FitVid(nn.Module):
 
         if not self.is_inference:
             if FLAGS.depth_loss == 'norm_mse':
-                self.depth_loss = F.mse_loss
+                self.depth_loss = mse_loss
             else:
                 raise NotImplementedError
 
@@ -373,7 +375,7 @@ class FitVid(nn.Module):
                 depth_model = MidasNet(model_location, non_negative=True)
             elif depth_model_type == 'mns':
                 depth_model = MidasNet_small(model_location, features=64, backbone="efficientnet_lite3", exportable=True,
-                                        non_negative=True, blocks={'expand': True})
+                                        non_negative=False, blocks={'expand': True})
             # Setting the memory format to channels last saves around 600MB VRAM but costs computation time
             #depth_model = depth_model.to(memory_format=torch.channels_last)
             #depth_model = depth_model.half()
@@ -401,19 +403,23 @@ class FitVid(nn.Module):
     def predict_depth(self, pred_frame, time_axis=True):
         if time_axis:
             shape = pred_frame.shape
-            pred_frame = pred_frame.view(
-                (shape[0] * shape[1],) + shape[2:])  # collapse batch*time dims [b0t0, b0t1, b0t2... b1t0, b1t1, b1t2...]
-        pred_frame = (pred_frame - self.depth_head_mean) / self.depth_head_std # normalize as done for pretrained MiDaS
+            try:
+                pred_frame = pred_frame.view(
+                    (shape[0] * shape[1],) + shape[2:])  # collapse batch*time dims [b0t0, b0t1, b0t2... b1t0, b1t1, b1t2...]
+            except Exception as e:
+                # if the dimensions span across subspaces, need to use reshape
+                pred_frame = pred_frame.reshape(
+                    (shape[0] * shape[1],) + shape[2:])  # collapse batch*time dims [b0t0, b0t1, b0t2... b1t0, b1t1, b1t2...]
+        pred_frame_norm = (pred_frame - self.depth_head_mean) / self.depth_head_std # normalize as done for pretrained MiDaS
 
-        if self.depth_model_size % pred_frame.shape[-1] != 0:
+        if self.depth_model_size % pred_frame_norm.shape[-1] != 0:
             raise ValueError('depth model and frame pred size mismatch!')
         if self.depth_model_size != pred_frame.shape[-1]:
-            pred_frame = torch.nn.Upsample(scale_factor=pred_frame.shape[-1]//self.depth_model_size)(pred_frame)
-        depth_pred = self.depth_head(pred_frame)[:, None].float()
+            pred_frame_norm = torch.nn.Upsample(scale_factor=self.depth_model_size//pred_frame_norm.shape[-1])(pred_frame_norm)
+        depth_pred = self.depth_head(pred_frame_norm)[:, None].float()
         # normalize to [0, 1]
         if self.depth_model_size != pred_frame.shape[-1]:
-            depth_pred = torch.nn.functional.interpolate(depth_pred, size=(64, 64))
-
+            depth_pred = torch.nn.functional.interpolate(depth_pred, size=pred_frame.shape[-2:])
         if time_axis:
             depth_pred = depth_pred.view((shape[0], shape[1],) + tuple(depth_pred.shape[1:]))
         else:
@@ -421,6 +427,7 @@ class FitVid(nn.Module):
         #depth_pred = 1 - normalize_depth(depth_pred, across_dims=1)
         #depth_pred = 1.0 / (depth_pred + 1e-10)
         #depth_pred = normalize_depth(depth_pred)
+        depth_pred = torch.clamp(depth_pred, min=0, max=1.0)
         return depth_pred
 
     def get_input(self, hidden, action, z):
@@ -453,7 +460,7 @@ class FitVid(nn.Module):
         skips = {k: skips[k].view((batch_size, video_len,) + tuple(skips[k].shape[1:]))[:, self.n_past - 1] for k in skips.keys()}
         loss, preds, metrics = self.calc_loss_helper(video, actions, hidden, skips, self.posterior, self.prior,
                                                      self.frame_predictor, depth=depth, segmentation=segmentation,
-                                                     compute_metrics=compute_metrics)
+                                                     compute_metrics = compute_metrics)
         return loss, preds, metrics
 
     def compute_metrics(self, vid1, vid2):
@@ -518,15 +525,14 @@ class FitVid(nn.Module):
         means = torch.stack(means, axis=1)
         logvars = torch.stack(logvars, axis=1)
 
-        mse = F.mse_loss(preds, video[:, 1:])
+        mse_per_sample = mse_loss(preds, video[:, 1:], reduce_batch=False)
+        mse = mse_per_sample.mean()
         loss = self.rgb_weight * mse + kld * self.beta
 
         if self.tv_weight:
             loss = loss + self.tv_weight * tv(preds)
         if self.policy_feature_weight:
             policy_loss = self.policy_feature_metric(preds, video[:, 1:])[1]
-            print(loss)
-            print(policy_loss)
             loss = loss + self.policy_feature_weight * policy_loss
 
         if segmentation is not None:
@@ -541,12 +547,14 @@ class FitVid(nn.Module):
         if self.has_depth_predictor and depth is not None:
             if self.depth_weight != 0:
                 depth_preds = self.predict_depth(preds)
-                depth_loss = self.depth_loss(depth_preds, depth[:, 1:])
+                depth_loss_per_sample = self.depth_loss(depth_preds, depth[:, 1:], reduce_batch=False)
+                depth_loss = depth_loss_per_sample.mean()
                 loss = loss + self.depth_weight * depth_loss
             else:
                 with torch.no_grad():
                     depth_preds = self.predict_depth(preds)
-                    depth_loss = self.depth_loss(depth_preds, depth[:, 1:])
+                    depth_loss_per_sample = self.depth_loss(depth_preds, depth[:, 1:], reduce_batch=False)
+                    depth_loss = depth_loss_per_sample.mean()
 
             if segmentation is not None:
                 sq_err = self.depth_loss(depth_preds, depth[:, 1:], reduction='none')
@@ -560,6 +568,7 @@ class FitVid(nn.Module):
             'hist/mean': means,
             'hist/logvars': logvars,
             'loss/mse': mse,
+            'loss/mse_per_sample': mse_per_sample,
             'loss/kld': kld,
             'loss/all': loss,
         }
@@ -574,7 +583,8 @@ class FitVid(nn.Module):
 
         if self.has_depth_predictor and depth is not None:
             metrics.update({
-                'loss/depth_loss': depth_loss.detach()
+                'loss/depth_loss': depth_loss.detach(),
+                'loss/depth_loss_per_sample': depth_loss_per_sample.detach(),
             })
             if segmentation is not None:
                 metrics.update({
@@ -584,7 +594,6 @@ class FitVid(nn.Module):
         if self.has_depth_predictor and depth is not None:
             preds = (preds, depth_preds)
         return loss, preds, metrics
-
 
     def evaluate(self, batch, compute_metrics=False):
         """Predict the full video conditioned on the first self.n_past frames. """
@@ -628,9 +637,11 @@ class FitVid(nn.Module):
         preds = torch.stack(preds, axis=1)
 
         video = video.view((batch_size, video_len,) + video.shape[1:])  # reconstuct first two dims
-        mse = F.mse_loss(preds, video[:, 1:])
+        mse_per_sample = mse_loss(preds, video[:, 1:], reduce_batch=False)
+        mse = mse_per_sample.mean()
         metrics = {
             'loss/mse': mse,
+            'loss/mse_per_sample': mse_per_sample,
         }
 
         if compute_metrics:
@@ -647,9 +658,13 @@ class FitVid(nn.Module):
         if self.has_depth_predictor and 'depth_video' in batch:
             depth_preds = torch.stack(depth_preds, axis=1)
             depth_video = batch['depth_video']
-            depth_loss = self.depth_loss(depth_preds, depth_video[:, 1:])
+            depth_loss_per_sample = self.depth_loss(depth_preds, depth_video[:, 1:], reduce_batch=False)
+            depth_loss = depth_loss_per_sample.mean()
             preds = (preds, depth_preds)
-            metrics.update({'loss/depth_mse': depth_loss})
+            metrics.update({
+                'loss/depth_mse': depth_loss,
+                'loss/depth_mse_per_sample': depth_loss_per_sample,
+            })
 
             if segmentation is not None:
                 sq_err = self.depth_loss(depth_preds, depth_video[:, 1:], reduction='none')
@@ -697,7 +712,14 @@ class FitVid(nn.Module):
 
 def load_data(dataset_files, data_type='train', depth=False, seg=True):
     video_len = FLAGS.n_past + FLAGS.n_future
-    return robomimic_data.load_dataset_robomimic_torch(dataset_files, FLAGS.batch_size, video_len, data_type, depth, view=FLAGS.camera_view, seg=seg)
+    if FLAGS.image_size:
+        assert len(FLAGS.image_size) == 2, "Image size should be (H, W)"
+        image_size = [int(i) for i in FLAGS.image_size]
+    else:
+        image_size = None
+    return robomimic_data.load_dataset_robomimic_torch(dataset_files, FLAGS.batch_size, video_len, image_size,
+                                                       data_type, depth, view=FLAGS.camera_view, cache_mode=FLAGS.cache_mode,
+                                                       seg=seg)
 
 
 def get_most_recent_checkpoint(dir):
@@ -747,6 +769,7 @@ def main(argv):
                    policy_feature_path=FLAGS.policy_feature_path,
                    policy_feature_weight=FLAGS.policy_feature_weight
                    )
+
     NGPU = torch.cuda.device_count()
     print('CUDA available devices: ', NGPU)
 
@@ -759,9 +782,11 @@ def main(argv):
     model.to('cuda:0')
 
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+
     if FLAGS.debug:
         # hack to make data loading and training faster
-        data_loader, prep_data = load_data(FLAGS.dataset_file, data_type='train', depth=FLAGS.pretrained_depth_objective, seg=FLAGS.has_segmentation)
+        data_loader, prep_data = load_data(FLAGS.dataset_file, data_type='valid', depth=FLAGS.pretrained_depth_objective, seg=FLAGS.has_segmentation)
     else:
         data_loader, prep_data = load_data(FLAGS.dataset_file, data_type='train', depth=FLAGS.pretrained_depth_objective, seg=FLAGS.has_segmentation)
     test_data_loader, prep_data_test = load_data(FLAGS.dataset_file, data_type='valid', depth=FLAGS.pretrained_depth_objective, seg=FLAGS.has_segmentation)
@@ -792,10 +817,6 @@ def main(argv):
         predicting_depth = FLAGS.pretrained_depth_objective
 
         print(f'\nEpoch {epoch} / {num_epochs}')
-        train_save_videos = []
-        test_save_videos = []
-        train_save_depth_videos = []
-        test_save_depth_videos = []
 
         print('Evaluating')
         model.eval()
@@ -814,8 +835,20 @@ def main(argv):
                     eval_preds, eval_depth_preds = eval_preds
                     depth_mse = metrics['loss/depth_mse']
                     if test_batch_idx < num_batch_to_save:
-                        save_depth_vids = torch.cat([batch['depth_video'][:4, 1:], eval_depth_preds[:4]], dim=-1).detach().cpu().numpy() # save only first 4 of a batch
-                        [test_save_depth_videos.append(vid) for vid in save_depth_vids]
+                        with torch.no_grad():
+                            gt_depth_preds = model.module.predict_depth(batch['video'][:, 1:])
+                        test_videos_log = {
+                            'gt': batch['video'][:, 1:],
+                            'pred': eval_preds,
+                            'gt_depth': batch['depth_video'][:, 1:],
+                            'gt_depth_pred': gt_depth_preds,
+                            'pred_depth': eval_depth_preds,
+                            'rgb_loss': metrics['loss/mse_per_sample'],
+                            'depth_loss_weight': model.module.depth_weight,
+                            'depth_loss': metrics['loss/depth_mse_per_sample'],
+                        }
+                        # save_depth_vids = torch.cat([batch['depth_video'][:4, 1:], gt_depth_preds, eval_depth_preds[:4]], dim=-1).detach().cpu().numpy() # save only first 4 of a batch
+                        # [test_save_depth_videos.append(vid) for vid in save_depth_vids]
                     epoch_depth_mse.append(depth_mse.item())
                 if test_batch_idx < num_batch_to_save:
                     save_vids = torch.cat([test_videos[:4, 1:], eval_preds[:4]], dim=-1).detach().cpu().numpy() # save only first 4 of a batch
@@ -864,7 +897,13 @@ def main(argv):
 
             if NGPU > 1:
                 loss = loss.mean()
-                metrics = {k: v.mean() for k, v in metrics.items()}
+                # collate metrics from across GPUs
+                for k, v in metrics.items():
+                    if len(metrics[k].shape) == 1:
+                        metrics[k] = v.mean()
+                    else: # the output is already a tensor, concatenate it
+                        metrics[k] = torch.cat(metrics[k], dim=1)
+                # metrics = {k: v.mean() for k, v in metrics.items()}
 
             if FLAGS.train:
                 loss.backward()
@@ -878,8 +917,20 @@ def main(argv):
                 save_vids = torch.cat([videos[:4, 1:], preds[:4]], dim=-1).detach().cpu().numpy()
                 [train_save_videos.append(vid) for vid in save_vids]
                 if predicting_depth:
-                    save_depth_vids = torch.cat([batch['depth_video'][:4, 1:], depth_preds[:4]], dim=-1).detach().cpu().numpy()
-                    [train_save_depth_videos.append(vid) for vid in save_depth_vids]
+                    with torch.no_grad():
+                        gt_depth_preds = model.module.predict_depth(batch['video'][:4, 1:])
+                    train_videos_log = {
+                        'gt': batch['video'][:, 1:],
+                        'pred': eval_preds,
+                        'gt_depth': batch['depth_video'][:, 1:],
+                        'gt_depth_pred': gt_depth_preds,
+                        'pred_depth': eval_depth_preds,
+                        'rgb_loss': metrics['loss/mse_per_sample'],
+                        'depth_loss_weight': model.module.depth_weight,
+                        'depth_loss': metrics['loss/depth_mse_per_sample'],
+                    }
+                    # save_depth_vids = torch.cat([batch['depth_video'][:4, 1:], gt_depth_preds, depth_preds[:4]], dim=-1).detach().cpu().numpy()
+                    # [train_save_depth_videos.append(vid) for vid in save_depth_vids]
 
             wandb_log.update({f'train/{k}': v for k, v in metrics.items()})
             wandb.log(wandb_log)
@@ -898,36 +949,38 @@ def main(argv):
 
         if epoch % 1 == 0:
             wandb_log = dict()
-            for i, vid in enumerate(test_save_videos):
-                vid = np.moveaxis(vid, 1, 3)
-                vid = np.array(vid * 255)
-                wandb_log.update({f'video_test_{i}': wandb.Video(np.moveaxis(vid, 3, 1), fps=4, format='gif')})
-                save_moviepy_gif(list(vid), os.path.join(FLAGS.output_dir, f'video_test_epoch{epoch}_{i}'), fps=5)
-                print('Saved test vid for the epoch')
-
-            for i, vid in enumerate(train_save_videos):
-                vid = np.moveaxis(vid, 1, 3)
-                vid = np.array(vid * 255)
-                wandb_log.update({f'video_train_{i}': wandb.Video(np.moveaxis(vid, 3, 1), fps=4, format='gif')})
-                save_moviepy_gif(list(vid), os.path.join(FLAGS.output_dir, f'video_train_epoch{epoch}_{i}'), fps=5)
-                print('Saved train vid for each epoch')
-
-            cmap_name = 'jet_r' #or 'inferno'?
-            colormap = plt.get_cmap(cmap_name)
-
-            for i, vid in enumerate(test_save_depth_videos):
-                vids = np.split(vid, 2, axis=-1)
-                vid = np.concatenate([depth_to_rgb_im(v, colormap) for v in vids], axis=-2)
-                wandb_log.update({f'video_depth_test_{i}': wandb.Video(np.moveaxis(vid, 3, 1), fps=4, format='gif')})
-                save_moviepy_gif(list(vid), os.path.join(FLAGS.output_dir, f'video_depth_test_epoch{epoch}_{i}'), fps=5)
-                print('Saved test depth vid for the epoch')
-
-            for i, vid in enumerate(train_save_depth_videos):
-                vids = np.split(vid, 2, axis=-1)
-                vid = np.concatenate([depth_to_rgb_im(v, colormap) for v in vids], axis=-2)
-                wandb_log.update({f'video_depth_train_{i}': wandb.Video(np.moveaxis(vid, 3, 1), fps=4, format='gif')})
-                save_moviepy_gif(list(vid), os.path.join(FLAGS.output_dir, f'video_depth_train_epoch{epoch}_{i}'), fps=5)
-                print('Saved train depth vid for the epoch')
+            test_visualization = build_visualization(**test_videos_log)
+            wandb_log.update({'test_vis': wandb.Video(test_visualization, fps=4, format='gif')})
+            train_visualization = build_visualization(**train_videos_log)
+            wandb_log.update({'train_vis': wandb.Video(train_visualization, fps=4, format='gif')})
+            # for i, vid in enumerate(test_save_videos):
+            #     vid = np.array(vid * 255)
+            #     wandb_log.update({f'video_test_{i}': wandb.Video(vid, fps=4, format='gif')})
+            #     save_moviepy_gif(list(vid), os.path.join(FLAGS.output_dir, f'video_test_epoch{epoch}_{i}'), fps=5)
+            #     print('Saved test vid for the epoch')
+            #
+            # for i, vid in enumerate(train_save_videos):
+            #     vid = np.array(vid * 255)
+            #     wandb_log.update({f'video_train_{i}': wandb.Video(vid, fps=4, format='gif')})
+            #     save_moviepy_gif(list(vid), os.path.join(FLAGS.output_dir, f'video_train_epoch{epoch}_{i}'), fps=5)
+            #     print('Saved train vid for each epoch')
+            #
+            # cmap_name = 'jet_r' #or 'inferno'?
+            # colormap = plt.get_cmap(cmap_name)
+            #
+            # for i, (rgb_vid, vid) in enumerate(zip(test_save_videos, test_save_depth_videos)):
+            #     vid = depth_to_rgb_im(vid, colormap)
+            #     vid = np.concatenate((vid, np.moveaxis(np.array(rgb_vid * 255), 1, 3)), axis=-2)
+            #     wandb_log.update({f'video_depth_test_{i}': wandb.Video(np.moveaxis(vid, 3, 1), fps=4, format='gif')})
+            #     save_moviepy_gif(list(vid), os.path.join(FLAGS.output_dir, f'video_depth_test_epoch{epoch}_{i}'), fps=5)
+            #     print('Saved test depth vid for the epoch')
+            #
+            # for i, (rgb_vid, vid) in enumerate(zip(train_save_videos, train_save_depth_videos)):
+            #     vid = depth_to_rgb_im(vid, colormap)
+            #     vid = np.concatenate((vid, np.moveaxis(np.array(rgb_vid * 255), 1, 3)), axis=-2)
+            #     wandb_log.update({f'video_depth_train_{i}': wandb.Video(np.moveaxis(vid, 3, 1), fps=4, format='gif')})
+            #     save_moviepy_gif(list(vid), os.path.join(FLAGS.output_dir, f'video_depth_train_epoch{epoch}_{i}'), fps=5)
+            #     print('Saved train depth vid for the epoch')
 
             wandb.log(wandb_log)
 

@@ -34,9 +34,9 @@ def load_model(model_name, path):
     return depth_model
 
 
-def get_dataloaders(dataset_files, bs, view):
-    train_load = load_dataset_robomimic_torch(dataset_files, batch_size=bs, video_len=10, phase='train', depth=True, view=view)
-    val_load = load_dataset_robomimic_torch(dataset_files, batch_size=bs, video_len=10, phase='valid', depth=True, view=view)
+def get_dataloaders(dataset_files, bs, dims, view):
+    train_load = load_dataset_robomimic_torch(dataset_files, batch_size=bs, video_len=10, video_dims=dims, phase='train', depth=True, view=view)
+    val_load = load_dataset_robomimic_torch(dataset_files, batch_size=bs, video_len=10, video_dims=dims, phase='valid', depth=True, view=view)
     return train_load, val_load
 
 
@@ -103,7 +103,7 @@ def log_preds(folder, rgb_images, true_images, preds, epoch, phase):
 def main(args):
     model = load_model(args.model_type, args.checkpoint)
     model = model.cuda()
-    train_loader, val_loader = get_dataloaders(args.dataset_files, args.batch_size, args.view)
+    train_loader, val_loader = get_dataloaders(args.dataset_files, args.batch_size, (args.image_size, args.image_size), args.view)
     train_loader, train_prep = train_loader
     val_loader, val_prep = val_loader
     # loss_fn = scale_invariant_loss
@@ -177,6 +177,8 @@ if __name__ == '__main__':
         '--view', default='agentview', required=True, help='Camera view to use for training')
     parser.add_argument(
         '--upsample_factor', default=4, help='factor to upsample images')
+    parser.add_argument(
+        '--image_size', default=64, help='image dimension')
     parser.add_argument(
         '--dataset_files', nargs='+', required=True, help='number of trajectories to run for complete eval')
     parser.add_argument(
