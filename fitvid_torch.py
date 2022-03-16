@@ -17,7 +17,8 @@ import piq
 
 from fitvid import robomimic_data
 from fitvid.depth_utils import normalize_depth, depth_to_rgb_im, DEFAULT_WEIGHT_LOCATIONS, \
-                               save_moviepy_gif, dict_to_cuda, mse_loss
+                               save_moviepy_gif, dict_to_cuda, mse_loss, sobel_loss
+from fitvid.vis_utils import build_visualization
 from fitvid.pytorch_metrics import psnr, lpips, ssim, tv, PolicyFeatureL2Metric
 
 FLAGS = flags.FLAGS
@@ -55,14 +56,14 @@ flags.DEFINE_boolean('wandb_online', None, 'Use wandb online mode (probably shou
 # Data
 flags.DEFINE_integer('action_size', 4, 'Action size.') #
 flags.DEFINE_spaceseplist('dataset_file', [], 'Dataset to load.')
-flags.DEFINE_string('cache_mode', 'lowdim', 'Dataset cache mode')
+flags.DEFINE_string('cache_mode', 'low_dim', 'Dataset cache mode')
 flags.DEFINE_string('camera_view', 'agentview', 'Camera view of data to load. Default is "agentview".')
 flags.DEFINE_list('image_size', [], 'H, W of images')
 
 # depth objective
 flags.DEFINE_boolean('depth_objective', False, 'Use depth image decoding as a auxiliary objective.')
 flags.DEFINE_float('depth_weight', 0, 'Weight on depth objective.')
-flags.DEFINE_string('depth_loss', 'norm_mse', 'Depth objective loss type. Choose from "norm_mse" and "eigen".')
+flags.DEFINE_string('depth_loss', 'mse', 'Depth objective loss type. Choose from "norm_mse" and "eigen".')
 flags.DEFINE_float('depth_start_epoch', 0, 'Weight on depth objective.')
 flags.DEFINE_boolean('pretrained_depth_objective', True, 'Instead of using a learned depth model, use a pretrained one.')
 flags.DEFINE_string('depth_model_path', None, 'Path to load pretrained depth model from.')
@@ -341,7 +342,7 @@ class FitVid(nn.Module):
         self.depth_weight, self.rgb_weight = depth_weight, 1 - depth_weight
 
         if not self.is_inference:
-            if FLAGS.depth_loss == 'norm_mse':
+            if FLAGS.depth_loss == 'mse':
                 self.depth_loss = mse_loss
             else:
                 raise NotImplementedError
@@ -557,7 +558,7 @@ class FitVid(nn.Module):
                     depth_loss = depth_loss_per_sample.mean()
 
             if segmentation is not None:
-                sq_err = self.depth_loss(depth_preds, depth[:, 1:], reduction='none')
+                sq_err = (depth_preds - depth[:, 1:]) ** 2 # TODO make this use self.depth_loss
                 sq_err[mask != 1] = 0
                 upweighted_depth_loss = sq_err.mean()
                 if self.segmentation_depth_loss_weight:
@@ -662,12 +663,12 @@ class FitVid(nn.Module):
             depth_loss = depth_loss_per_sample.mean()
             preds = (preds, depth_preds)
             metrics.update({
-                'loss/depth_mse': depth_loss,
-                'loss/depth_mse_per_sample': depth_loss_per_sample,
+                'loss/depth_loss': depth_loss,
+                'loss/depth_loss_per_sample': depth_loss_per_sample,
             })
 
             if segmentation is not None:
-                sq_err = self.depth_loss(depth_preds, depth_video[:, 1:], reduction='none')
+                sq_err = (depth_preds - depth_video[:, 1:]) ** 2
                 sq_err[mask != 1] = 0
                 upweighted_depth_loss = sq_err.mean()
                 metrics.update({'loss/segmented_depth_mse': upweighted_depth_loss})
@@ -833,26 +834,26 @@ def main(argv):
                 metrics, eval_preds = model.module.evaluate(batch, compute_metrics=test_batch_idx % 500 == 0)
                 if predicting_depth:
                     eval_preds, eval_depth_preds = eval_preds
-                    depth_mse = metrics['loss/depth_mse']
+                    depth_mse = metrics['loss/depth_loss']
                     if test_batch_idx < num_batch_to_save:
                         with torch.no_grad():
                             gt_depth_preds = model.module.predict_depth(batch['video'][:, 1:])
-                        test_videos_log = {
-                            'gt': batch['video'][:, 1:],
-                            'pred': eval_preds,
-                            'gt_depth': batch['depth_video'][:, 1:],
-                            'gt_depth_pred': gt_depth_preds,
-                            'pred_depth': eval_depth_preds,
-                            'rgb_loss': metrics['loss/mse_per_sample'],
-                            'depth_loss_weight': model.module.depth_weight,
-                            'depth_loss': metrics['loss/depth_mse_per_sample'],
-                        }
                         # save_depth_vids = torch.cat([batch['depth_video'][:4, 1:], gt_depth_preds, eval_depth_preds[:4]], dim=-1).detach().cpu().numpy() # save only first 4 of a batch
                         # [test_save_depth_videos.append(vid) for vid in save_depth_vids]
                     epoch_depth_mse.append(depth_mse.item())
                 if test_batch_idx < num_batch_to_save:
-                    save_vids = torch.cat([test_videos[:4, 1:], eval_preds[:4]], dim=-1).detach().cpu().numpy() # save only first 4 of a batch
-                    [test_save_videos.append(vid) for vid in save_vids]
+                    test_videos_log = {
+                        'gt': batch['video'][:, 1:],
+                        'pred': eval_preds,
+                        'gt_depth': batch['depth_video'][:, 1:],
+                        'gt_depth_pred': gt_depth_preds,
+                        'pred_depth': eval_depth_preds,
+                        'rgb_loss': metrics['loss/mse_per_sample'],
+                        'depth_loss_weight': model.module.depth_weight,
+                        'depth_loss': metrics['loss/depth_loss_per_sample'],
+                    }
+                    # save_vids = torch.cat([test_videos[:4, 1:], eval_preds[:4]], dim=-1).detach().cpu().numpy() # save only first 4 of a batch
+                    # [test_save_videos.append(vid) for vid in save_vids]
                 epoch_mse.append(metrics['loss/mse'].item())
                 if test_batch_idx % 500 == 0:
                     wandb_log.update({f'eval/{k}': v for k, v in metrics.items()})
@@ -914,24 +915,24 @@ def main(argv):
             train_mse.append(metrics['loss/mse'].item())
             videos = batch['video']
             if batch_idx < num_batch_to_save:
-                save_vids = torch.cat([videos[:4, 1:], preds[:4]], dim=-1).detach().cpu().numpy()
-                [train_save_videos.append(vid) for vid in save_vids]
+                # save_vids = torch.cat([videos[:4, 1:], preds[:4]], dim=-1).detach().cpu().numpy()
+                # [train_save_videos.append(vid) for vid in save_vids]
                 if predicting_depth:
                     with torch.no_grad():
-                        gt_depth_preds = model.module.predict_depth(batch['video'][:4, 1:])
-                    train_videos_log = {
-                        'gt': batch['video'][:, 1:],
-                        'pred': eval_preds,
-                        'gt_depth': batch['depth_video'][:, 1:],
-                        'gt_depth_pred': gt_depth_preds,
-                        'pred_depth': eval_depth_preds,
-                        'rgb_loss': metrics['loss/mse_per_sample'],
-                        'depth_loss_weight': model.module.depth_weight,
-                        'depth_loss': metrics['loss/depth_mse_per_sample'],
-                    }
+                        gt_depth_preds = model.module.predict_depth(batch['video'][:, 1:])
+
                     # save_depth_vids = torch.cat([batch['depth_video'][:4, 1:], gt_depth_preds, depth_preds[:4]], dim=-1).detach().cpu().numpy()
                     # [train_save_depth_videos.append(vid) for vid in save_depth_vids]
-
+                train_videos_log = {
+                    'gt': batch['video'][:, 1:],
+                    'pred': eval_preds,
+                    'gt_depth': batch['depth_video'][:, 1:],
+                    'gt_depth_pred': gt_depth_preds,
+                    'pred_depth': eval_depth_preds,
+                    'rgb_loss': metrics['loss/mse_per_sample'],
+                    'depth_loss_weight': model.module.depth_weight,
+                    'depth_loss': metrics['loss/depth_loss_per_sample'],
+                }
             wandb_log.update({f'train/{k}': v for k, v in metrics.items()})
             wandb.log(wandb_log)
             if FLAGS.debug and batch_idx > 25:

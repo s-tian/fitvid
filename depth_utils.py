@@ -3,6 +3,8 @@ import matplotlib.pyplot as plt
 import torch.nn.functional as F
 import torch
 
+from kornia.filters import sobel
+
 DEFAULT_WEIGHT_LOCATIONS = {
     'dpt': '/viscam/u/stian/perceptual-metrics/MiDaS/weights/dpt_hybrid-midas-501f0c75.pt',
     'mn': '/viscam/u/stian/perceptual-metrics/MiDaS/weights/midas_v21-f6b98070.pt',
@@ -36,12 +38,17 @@ def depth_to_rgb_im(im, cmap=plt.get_cmap('jet_r')):
     return (im * 255).astype(np.uint8)
 
 
-def mse_loss(a, b, reduce_batch=True):
+def sobel_loss(t1, t2, reduce_batch=True):
+    t1_sobel, t2_sobel = sobel(t1), sobel(t2)
+    return mse_loss(t1_sobel, t2_sobel, reduce_batch=reduce_batch)
+
+
+def mse_loss(t1, t2, reduce_batch=True):
     if reduce_batch:
-        return ((a - b) ** 2).mean()
+        return ((t1 - t2) ** 2).mean()
     else:
         reduce_dims = tuple(range(len(a.shape)))
-        return ((a - b) ** 2).mean(dim=reduce_dims[1:])
+        return ((t1 - t2) ** 2).mean(dim=reduce_dims[1:])
 
 
 def test_mse_loss():
