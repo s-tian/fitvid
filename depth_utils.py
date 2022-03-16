@@ -39,7 +39,11 @@ def depth_to_rgb_im(im, cmap=plt.get_cmap('jet_r')):
 
 
 def sobel_loss(t1, t2, reduce_batch=True):
+    original_shape = t1.shape
+    compress_shape = (-1,) + tuple(t1.shape[-3:])  # change to (B, C, H, W)
+    t1, t2 = torch.reshape(t1, compress_shape), torch.reshape(t2, compress_shape)
     t1_sobel, t2_sobel = sobel(t1), sobel(t2)
+    t1_sobel, t2_sobel = torch.reshape(t1_sobel, original_shape), torch.reshape(t2_sobel, original_shape)
     return mse_loss(t1_sobel, t2_sobel, reduce_batch=reduce_batch)
 
 
@@ -47,7 +51,7 @@ def mse_loss(t1, t2, reduce_batch=True):
     if reduce_batch:
         return ((t1 - t2) ** 2).mean()
     else:
-        reduce_dims = tuple(range(len(a.shape)))
+        reduce_dims = tuple(range(len(t1.shape)))
         return ((t1 - t2) ** 2).mean(dim=reduce_dims[1:])
 
 

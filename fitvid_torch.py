@@ -344,6 +344,8 @@ class FitVid(nn.Module):
         if not self.is_inference:
             if FLAGS.depth_loss == 'mse':
                 self.depth_loss = mse_loss
+            elif FLAGS.depth_loss == 'sobel':
+                self.depth_loss = sobel_loss
             else:
                 raise NotImplementedError
 
