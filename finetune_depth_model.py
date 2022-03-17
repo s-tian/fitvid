@@ -77,7 +77,7 @@ def scale_invariant_loss(pred, actual):
 
 
 def prep_batch(batch, upsample_factor):
-    depth_images = batch['depth_video']
+    depth_images = batch['depth_video'][:, :, None]
     images = flatten_dims(batch['video'])
     if upsample_factor != 1:
         images = torch.nn.Upsample(scale_factor=upsample_factor)(images)

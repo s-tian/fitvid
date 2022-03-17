@@ -903,9 +903,12 @@ def main(argv):
                 # collate metrics from across GPUs
                 for k, v in metrics.items():
                     if len(metrics[k].shape) == 1:
-                        metrics[k] = v.mean()
-                    else: # the output is already a tensor, concatenate it
-                        metrics[k] = torch.cat(metrics[k], dim=1)
+                        if metrics[k].shape[0] == NGPU:
+                            metrics[k] = v.mean()
+                    # TODO: This logic is not quite right, since with batch sizes of 1 it doesn't work.
+                    # fix this by handling the case where scalars are returned from each GPU properly to differentiate.
+                    # else: # the output is already a tensor, concatenate it
+                    #     metrics[k] = torch.cat(list(metrics[k]), dim=1)
                 # metrics = {k: v.mean() for k, v in metrics.items()}
 
             if FLAGS.train:
@@ -927,10 +930,10 @@ def main(argv):
                     # [train_save_depth_videos.append(vid) for vid in save_depth_vids]
                 train_videos_log = {
                     'gt': batch['video'][:, 1:],
-                    'pred': eval_preds,
+                    'pred': preds,
                     'gt_depth': batch['depth_video'][:, 1:],
                     'gt_depth_pred': gt_depth_preds,
-                    'pred_depth': eval_depth_preds,
+                    'pred_depth': depth_preds,
                     'rgb_loss': metrics['loss/mse_per_sample'],
                     'depth_loss_weight': model.module.depth_weight,
                     'depth_loss': metrics['loss/depth_loss_per_sample'],

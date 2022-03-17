@@ -77,7 +77,7 @@ def get_data_loader(dataset_paths, batch_size, video_len, video_dims, phase, dep
     return data_loader
 
 
-def load_dataset_robomimic_torch(dataset_path, batch_size, video_len, video_dims, phase, depth, view='agentview', cache_mode='lowdim', seg=True):
+def load_dataset_robomimic_torch(dataset_path, batch_size, video_len, video_dims, phase, depth, view='agentview', cache_mode='low_dim', seg=True):
     assert phase in ['train', 'valid'], f'Phase is not one of the acceptable values! Got {phase}'
 
     loader = get_data_loader(dataset_path, batch_size, video_len, video_dims, phase, depth, view, cache_mode, seg)
