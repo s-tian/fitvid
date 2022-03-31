@@ -77,7 +77,7 @@ def scale_invariant_loss(pred, actual):
 
 
 def prep_batch(batch, upsample_factor):
-    depth_images = batch['depth_video'][:, :, None]
+    depth_images = batch['depth_video']
     images = flatten_dims(batch['video'])
     if upsample_factor != 1:
         images = torch.nn.Upsample(scale_factor=upsample_factor)(images)
@@ -120,7 +120,6 @@ def main(args):
         os.makedirs(output_folder)
 
     for epoch in range(args.epochs):
-
         model.eval()
         print('Running validation...')
         for i, batch in enumerate(val_loader):
@@ -131,7 +130,8 @@ def main(args):
             with torch.no_grad():
                 preds = model(images)
                 if args.upsample_factor != 1:
-                    preds = torch.nn.functional.interpolate(preds[:, None], size=(64, 64))
+                    # preds = torch.nn.functional.interpolate(preds[:, None], size=(64, 64))
+                    preds = torch.nn.functional.interpolate(preds[:, None], size=(64, 64), mode='bilinear')
                 preds = preds.reshape(-1, traj_length, *preds.shape[1:])
                 # preds = 1.0 / (preds + 1e-10) + 0.5
                 # preds = 1 - preds
@@ -150,7 +150,8 @@ def main(args):
             images, depth_images = prep_batch(batch, args.upsample_factor)
             preds = model(images)
             if args.upsample_factor != 1:
-                preds = torch.nn.functional.interpolate(preds[:, None], size=(64, 64))
+                # preds = torch.nn.functional.interpolate(preds[:, None], size=(64, 64))
+                preds = torch.nn.functional.interpolate(preds[:, None], size=(64, 64), mode='bilinear')
             preds = preds.reshape(-1, traj_length, *preds.shape[1:])
             # preds = 1 - preds
             # preds = 1.0 / (preds + 1e-10) + 0.5

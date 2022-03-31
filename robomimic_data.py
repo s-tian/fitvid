@@ -15,7 +15,7 @@ def get_image_name(cam):
         return f'{cam}_image'
 
 
-def get_data_loader(dataset_paths, batch_size, video_len, video_dims, phase, depth, view, cache_mode='lowdim', seg=True):
+def get_data_loader(dataset_paths, batch_size, video_len, video_dims, phase, depth, view, cache_mode='lowdim', seg=True, only_depth=False):
     """
     Get a data loader to sample batches of data.
     """
@@ -33,12 +33,13 @@ def get_data_loader(dataset_paths, batch_size, video_len, video_dims, phase, dep
     all_datasets = []
     for i, dataset_path in enumerate(dataset_paths):
         #obs_keys = (f"{view}_image", f"{view}_segmentation_instance")
-        if seg:
-            obs_keys = (imageview_name, f"{view}_seg")
-        else:
-            obs_keys = (imageview_name, )
-        if depth:
+        obs_keys = tuple()
+        if not only_depth:
+            obs_keys = obs_keys + (imageview_name, )
+        if depth or only_depth:
             obs_keys = obs_keys + (f"{view}_depth",)
+        if seg:
+            obs_keys = obs_keys + (f"{view}_seg",)
 
         dataset = SequenceDataset(
             hdf5_path=dataset_path,
@@ -71,23 +72,29 @@ def get_data_loader(dataset_paths, batch_size, video_len, video_dims, phase, dep
         sampler=None,       # no custom sampling logic (uniform sampling)
         batch_size=batch_size,     
         shuffle=True,
-        num_workers=2,
+        num_workers=0,
         drop_last=True,      # don't provide last batch in dataset pass if it's less than 100 in size
     )
     return data_loader
 
 
-def load_dataset_robomimic_torch(dataset_path, batch_size, video_len, video_dims, phase, depth, view='agentview', cache_mode='low_dim', seg=True):
+def load_dataset_robomimic_torch(dataset_path, batch_size, video_len, video_dims, phase, depth, view='agentview', cache_mode='low_dim', seg=True, only_depth=False):
     assert phase in ['train', 'valid'], f'Phase is not one of the acceptable values! Got {phase}'
 
-    loader = get_data_loader(dataset_path, batch_size, video_len, video_dims, phase, depth, view, cache_mode, seg)
+    loader = get_data_loader(dataset_path, batch_size, video_len, video_dims, phase, depth, view, cache_mode, seg, only_depth)
 
     def prepare_data(xs):
-        data_dict = {
-            'video': xs['obs'][get_image_name(view)],
-            'actions': xs['actions'],
-            #'segmentation': xs['obs'][f'{view}_segmentation_instance']
-        }
+        if only_depth:
+            # take depth video as the actual video
+            data_dict = {
+                'video': xs['obs'][f'{view}_depth'],
+                'actions': xs['actions'],
+            }
+        else:
+            data_dict = {
+                'video': xs['obs'][get_image_name(view)],
+                'actions': xs['actions'],
+            }
         if f'{view}_seg' in xs['obs']:
             data_dict['segmentation'] = xs['obs'][f'{view}_seg']
             # zero out the parts of the segmentation which are not assigned label corresponding to object of interest
@@ -102,9 +109,8 @@ def load_dataset_robomimic_torch(dataset_path, batch_size, video_len, video_dims
             data_dict['segmentation'] = seg_image
         else:
             data_dict['segmentation'] = None
-        if depth:
+        if depth and not only_depth:
             data_dict['depth_video'] = xs['obs'][f'{view}_depth']
-
         return data_dict
 
     return loader, prepare_data
