@@ -31,6 +31,7 @@ flags.DEFINE_integer('n_past', 2, 'Number of past frames.')
 flags.DEFINE_integer('n_future', 10, 'Number of future frames.') # not used, inferred directly from data
 flags.DEFINE_integer('num_epochs', 1000, 'Number of steps to train for.')
 flags.DEFINE_float('beta', 1e-4, 'Weight on KL.')
+flags.DEFINE_float('lr', 1e-3, 'Weight on KL.')
 flags.DEFINE_float('tv_weight', 0.0, 'Weight on TV loss.')
 flags.DEFINE_string('data_in_gpu', 'True', 'whether to put data in GPU, or RAM')
 flags.DEFINE_boolean('has_segmentation', True, 'Does dataset have segmentation masks')
@@ -799,7 +800,7 @@ def main(argv):
     model = torch.nn.DataParallel(model)
     model.to('cuda:0')
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    optimizer = torch.optim.Adam(model.parameters(), lr=FLAGS.lr)
 
     if FLAGS.debug:
         # hack to make data loading and training faster
