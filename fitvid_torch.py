@@ -364,7 +364,18 @@ class FitVid(nn.Module):
         self.decoder = ModularDecoder(first_block_shape=first_block_shape, input_size=kwargs['g_dim'], stage_sizes=kwargs['stage_sizes'],
                                       num_base_filters=kwargs['num_base_filters'], skip_type=kwargs['skip_type'], expand=kwargs['expand_decoder'],
                                       num_output_channels=self.num_video_channels)
+        self.load_pretrained_depth_model()
 
+        if self.policy_feature_path:
+            self.policy_feature_metric = PolicyFeatureL2Metric(self.policy_feature_path, 'fc0')
+        else:
+            assert self.policy_feature_weight == 0, 'Policy feature weight is nonzero but there was no policy path specified!'
+            print('No policy feature path provided, not using that metric!')
+            self.policy_feature_metric = None
+        input_size = self.get_input_size(kwargs['g_dim'], kwargs['action_size'], kwargs['z_dim'])
+        self.frame_predictor = MultiGaussianLSTM(input_size=input_size, output_size=kwargs['g_dim'], hidden_size=kwargs['rnn_size'], num_layers=2)
+
+    def load_pretrained_depth_model(self):
         if self.has_depth_predictor:
             #assert FLAGS.pretrained_depth_objective, 'Only pretrained depth objective available right now'
             from midas.dpt_depth import DPTDepthModel
@@ -376,6 +387,7 @@ class FitVid(nn.Module):
                 model_location = self.pretrained_depth_path
             else:
                 model_location = DEFAULT_WEIGHT_LOCATIONS[depth_model_type]
+            print(f'Load depth model from {model_location}')
             if depth_model_type == 'dpt':
                 depth_model = DPTDepthModel(
                     path=model_location,
@@ -401,15 +413,6 @@ class FitVid(nn.Module):
             net_w, net_h = 384, 384
             self.register_buffer('depth_head_mean', torch.Tensor([0.485, 0.456, 0.406])[..., None, None])
             self.register_buffer('depth_head_std', torch.Tensor([0.229, 0.224, 0.225])[..., None, None])
-
-        if self.policy_feature_path:
-            self.policy_feature_metric = PolicyFeatureL2Metric(self.policy_feature_path, 'fc0')
-        else:
-            assert self.policy_feature_weight == 0, 'Policy feature weight is nonzero but there was no policy path specified!'
-            print('No policy feature path provided, not using that metric!')
-            self.policy_feature_metric = None
-        input_size = self.get_input_size(kwargs['g_dim'], kwargs['action_size'], kwargs['z_dim'])
-        self.frame_predictor = MultiGaussianLSTM(input_size=input_size, output_size=kwargs['g_dim'], hidden_size=kwargs['rnn_size'], num_layers=2)
 
     def predict_depth(self, pred_frame, time_axis=True):
         if time_axis:
@@ -719,6 +722,9 @@ class FitVid(nn.Module):
         state_dict = torch.load(path)
         self.load_state_dict(state_dict, strict=False)
         print(f'Loaded checkpoint {path}')
+        if self.has_depth_predictor:
+            self.load_pretrained_depth_model() # reload pretrained depth model
+            print('Reloaded depth model')
 
 
 def load_data(dataset_files, data_type='train', depth=False, seg=True):

@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import piq
-from perceptual_metrics.distill_policy import create_image_policy
+from perceptual_metrics.scripts.distill_policy import create_image_policy
 
 
 def flatten_image(x):

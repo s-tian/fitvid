@@ -9,7 +9,7 @@ import midas
 from fitvid.fitvid_torch import dict_to_cuda, normalize_depth
 from fitvid.robomimic_data import load_dataset_robomimic_torch
 from fitvid.depth_utils import normalize_depth, depth_to_rgb_im, save_moviepy_gif, DEFAULT_WEIGHT_LOCATIONS
-from perceptual_metrics.utils import save_torch_img
+from perceptual_metrics.mpc.utils import save_torch_img
 
 
 def load_model(model_name, path):
