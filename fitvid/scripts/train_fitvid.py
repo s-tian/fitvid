@@ -9,13 +9,17 @@ from torch.utils.data import Dataset, DataLoader
 import matplotlib.pyplot as plt
 import os
 import glob
+import json
 from copy import deepcopy
 from tqdm import tqdm
 import moviepy
 import wandb
 
-from fitvid.data import robomimic_data
+from fitvid.data.robomimic_data import load_dataset_robomimic_torch
+from fitvid.data.hdf5_data_loader import load_hdf5_data
 from fitvid.model.fitvid import FitVid
+from fitvid.utils.utils import dict_to_cuda
+from fitvid.utils.vis_utils import save_moviepy_gif
 
 
 FLAGS = flags.FLAGS
@@ -29,7 +33,7 @@ flags.DEFINE_integer('num_epochs', 1000, 'Number of steps to train for.')
 flags.DEFINE_float('beta', 1e-4, 'Weight on KL.')
 flags.DEFINE_string('data_in_gpu', 'True', 'whether to put data in GPU, or RAM')
 flags.DEFINE_string('loss', 'l2', 'whether to use l2 or l1 loss')
-flags.DEFINE_string('lr', '1e-3', 'learning rate')
+flags.DEFINE_float('lr', 1e-3, 'learning rate')
 flags.DEFINE_float('weight_decay', 0.0, 'weight decay value')
 flags.DEFINE_boolean('stochastic', True, 'Use a stochastic model.')
 
@@ -53,15 +57,25 @@ flags.DEFINE_boolean('wandb_online', None, 'Use wandb online mode (probably shou
 # Data
 flags.DEFINE_spaceseplist('dataset_file', [], 'Dataset to load.')
 flags.DEFINE_boolean('hdf5_data', None, 'using hdf5 data')
+flags.DEFINE_string('cache_mode', 'low_dim', 'Dataset cache mode')
+flags.DEFINE_string('camera_view', 'agentview', 'Camera view of data to load. Default is "agentview".')
+flags.DEFINE_list('image_size', [], 'H, W of images')
 
 # post hoc analysis
 flags.DEFINE_string('re_eval', 'False', 'Re evaluate all available checkpoints saved.')
 flags.DEFINE_integer('re_eval_bs', 20, 'bs override')
 
 
-def load_data(dataset_files, data_type='train', depth=False):
+def load_data(dataset_files, data_type='train', depth=False, seg=True):
     video_len = FLAGS.n_past + FLAGS.n_future
-    return robomimic_data.load_dataset_robomimic_torch(dataset_files, FLAGS.batch_size, video_len, data_type, depth)
+    if FLAGS.image_size:
+        assert len(FLAGS.image_size) == 2, "Image size should be (H, W)"
+        image_size = [int(i) for i in FLAGS.image_size]
+    else:
+        image_size = None
+    return load_dataset_robomimic_torch(dataset_files, FLAGS.batch_size, video_len, image_size,
+                                                       data_type, depth, view=FLAGS.camera_view, cache_mode=FLAGS.cache_mode,
+                                                       seg=seg, only_depth=False)
 
 
 def get_most_recent_checkpoint(dir):
@@ -85,13 +99,6 @@ def main(argv):
     np.random.seed(0)
     os.environ['PYTHONHASHSEED'] = str(0)
 
-    if FLAGS.loss=='l2':
-        loss_fn = F.mse_loss
-    elif FLAGS.loss == 'l1':
-        loss_fn = F.l1_loss
-    else:
-        raise NotImplementedError
-
     model = FitVid(stage_sizes=[int(i) for i in FLAGS.stage_sizes],
                    z_dim=FLAGS.z_dim,
                    g_dim=FLAGS.g_dim,
@@ -105,7 +112,7 @@ def main(argv):
                    is_inference=False,
                    expand_decoder=FLAGS.expand,
                    beta=FLAGS.beta,
-                   loss_fn=loss_fn,
+                   loss_fn=FLAGS.loss,
                    stochastic=FLAGS.stochastic
                    )
 
@@ -128,13 +135,12 @@ def main(argv):
     optimizer = torch.optim.Adam(model.parameters(), lr=FLAGS.lr, weight_decay=FLAGS.weight_decay)
 
     if FLAGS.hdf5_data:
-        from fitvid.data import load_hdf5_data
         data_loader = load_hdf5_data(FLAGS.dataset_file, FLAGS.batch_size, data_type='train')
         test_data_loader = load_hdf5_data(FLAGS.dataset_file, FLAGS.batch_size, data_type='val')
         prep_data = prep_data_test = lambda x: x
     else:
-        data_loader, prep_data = load_data(FLAGS.dataset_file, data_type='train', depth=FLAGS.depth_objective)
-        test_data_loader, prep_data_test = load_data(FLAGS.dataset_file, data_type='valid', depth=FLAGS.depth_objective)
+        data_loader, prep_data = load_data(FLAGS.dataset_file, data_type='train')
+        test_data_loader, prep_data_test = load_data(FLAGS.dataset_file, data_type='valid')
 
     wandb.init(
         project='fitvid-torch',
@@ -167,16 +173,13 @@ def main(argv):
         with torch.no_grad():
             wandb_log = {}
             epoch_mse = []
-            epoch_depth_mse = []
             for iter_item in enumerate(tqdm(test_data_loader)):
                 test_batch_idx, batch = iter_item
                 batch = dict_to_cuda(prep_data_test(batch))
                 test_videos = batch['video']
 
-                if NGPU > 1:
-                    mse, eval_preds = model.module.evaluate(batch)
-                else:
-                    mse, eval_preds = model.evaluate(batch)
+                mse, eval_preds = model.module.evaluate(batch)
+
                 if test_batch_idx < num_batch_to_save:
                     save_vids = torch.cat([test_videos[:4, 1:], eval_preds[:4]], dim=-1).detach().cpu().numpy() # save only first 4 of a batch
                     [test_save_videos.append(vid) for vid in save_vids]
@@ -192,10 +195,7 @@ def main(argv):
             if not os.path.isdir(FLAGS.output_dir):
                 os.mkdir(FLAGS.output_dir)
             save_path = os.path.join(FLAGS.output_dir, f'model_best')
-            if NGPU > 1:
-                torch.save(model.module.state_dict(), save_path)
-            else:
-                torch.save(model.state_dict(), save_path)
+            torch.save(model.module.state_dict(), save_path)
             print(f'Saved new best model to {save_path}')
 
         print('Training')
@@ -207,10 +207,7 @@ def main(argv):
 
             batch_idx, batch = iter_item
             batch = dict_to_cuda(prep_data(batch))
-            if predicting_depth:
-                inputs = batch['video'], batch['actions'], batch['depth_video']
-            else:
-                inputs = batch['video'], batch['actions']
+            inputs = batch['video'], batch['actions']
             loss, preds, metrics = model(*inputs)
 
             if NGPU > 1:

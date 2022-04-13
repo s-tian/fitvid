@@ -1,3 +1,8 @@
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
 from fitvid.model.nvae import ModularEncoder, ModularDecoder
 
 
@@ -31,31 +36,36 @@ class MultiGaussianLSTM(nn.Module):
 class FitVid(nn.Module):
     """FitVid video predictor."""
 
-    def __init__(self, stage_sizes, z_dim, g_dim, rnn_size, num_base_filters, first_block_shape, expand_decoder,
-                 skip_type, n_past, action_conditioned, action_size, is_inference, beta, loss_fn, stochastic):
+    def __init__(self, **kwargs):
         super(FitVid, self).__init__()
-        self.n_past = n_past
-        self.action_conditioned = action_conditioned
-        self.beta = beta
-        self.stochastic = stochastic
-        self.is_inference = is_inference
-        self.skip_type = skip_type
-        self.loss_fn = loss_fn
-        self.z_dim = z_dim
+        self.config = kwargs
+        self.n_past = kwargs['n_past']
+        self.action_conditioned = kwargs['action_conditioned']
+        self.beta = kwargs['beta']
+        self.stochastic = True
+        self.is_inference = kwargs['is_inference']
+        self.skip_type = kwargs['skip_type']
 
-        first_block_shape = [first_block_shape[-1]] + first_block_shape[:2]
-        self.encoder = ModularEncoder(stage_sizes=stage_sizes, output_size=g_dim, num_base_filters=num_base_filters)
+        if kwargs['loss_fn'] == 'l2':
+            self.loss_fn = F.mse_loss
+        elif kwargs['loss_fn'] == 'l1':
+            self.loss_fn = F.l1_loss
+        else:
+            raise NotImplementedError
+
+        first_block_shape = [kwargs['first_block_shape'][-1]] + kwargs['first_block_shape'][:2]
+        self.encoder = ModularEncoder(stage_sizes=kwargs['stage_sizes'], output_size=kwargs['g_dim'], num_base_filters=kwargs['num_base_filters'])
         if self.stochastic:
-            self.prior = MultiGaussianLSTM(input_size=g_dim, output_size=z_dim, hidden_size=rnn_size, num_layers=1)
-            self.posterior = MultiGaussianLSTM(input_size=g_dim, output_size=z_dim, hidden_size=rnn_size, num_layers=1)
+            self.prior = MultiGaussianLSTM(input_size=kwargs['g_dim'], output_size=kwargs['z_dim'], hidden_size=kwargs['rnn_size'], num_layers=1)
+            self.posterior = MultiGaussianLSTM(input_size=kwargs['g_dim'], output_size=kwargs['z_dim'], hidden_size=kwargs['rnn_size'], num_layers=1)
         else:
             self.prior, self.posterior = None, None
 
-        self.decoder = ModularDecoder(first_block_shape=first_block_shape, input_size=g_dim, stage_sizes=stage_sizes,
-                                      num_base_filters=num_base_filters, skip_type=skip_type, expand=expand_decoder)
+        self.decoder = ModularDecoder(first_block_shape=first_block_shape, input_size=kwargs['g_dim'], stage_sizes=kwargs['stage_sizes'],
+                                      num_base_filters=kwargs['num_base_filters'], skip_type=kwargs['skip_type'], expand=kwargs['expand_decoder'])
 
-        input_size = self.get_input_size(g_dim, action_size, z_dim)
-        self.frame_predictor = MultiGaussianLSTM(input_size=input_size, output_size=g_dim, hidden_size=rnn_size, num_layers=2)
+        input_size = self.get_input_size(kwargs['g_dim'], kwargs['action_size'], kwargs['z_dim'])
+        self.frame_predictor = MultiGaussianLSTM(input_size=input_size, output_size=kwargs['g_dim'], hidden_size=kwargs['rnn_size'], num_layers=2)
 
     def get_input(self, hidden, action, z):
         inp = [hidden]

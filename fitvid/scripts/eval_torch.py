@@ -23,7 +23,7 @@ import time
 
 from absl import app
 from absl import flags
-from fitvid.scripts.fitvid_torch import load_data, dict_to_cuda, depth_to_rgb_im
+from fitvid.scripts.train_fitvid import load_data, dict_to_cuda, depth_to_rgb_im
 from fitvid.model.fitvid import FitVid
 import torch
 import numpy as np

@@ -1,3 +1,6 @@
+import torch
+
+
 def resize_tensor(t, dims):
     h, w = dims
     if t.shape[-2] == h and t.shape[-1] == w:
