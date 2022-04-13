@@ -15,6 +15,7 @@ class FiLM(nn.Module):
         residual = gamma * x + beta
         return residual + x
 
+
 if __name__ == '__main__':
     key1, key2 = random.split(random.PRNGKey(0), 2)
     x = random.uniform(key1, (4, 5))

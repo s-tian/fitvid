@@ -111,14 +111,10 @@ def load_dataset_robomimic(dataset_path, batch_size, video_len, is_train, depth)
     iterable = map(prepare_data, iterable)
     return iterable
 
+
 if __name__ == '__main__':
     dataset_path = '/viscam/u/stian/perceptual-metrics/robomimic/datasets/lift/mg/image_and_depth.hdf5'
     
     dataset = load_dataset_robomimic(dataset_path, 16, 10, True)
     batch = next(dataset)
-    import ipdb; ipdb.set_trace()
-    
-    #dataloader = get_data_loader(dataset_path, 1, 10, 'train')
-    #batch = next(iter(dataloader))
 
-    
