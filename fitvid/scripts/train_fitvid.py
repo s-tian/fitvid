@@ -60,6 +60,7 @@ flags.DEFINE_boolean('hdf5_data', None, 'using hdf5 data')
 flags.DEFINE_string('cache_mode', 'low_dim', 'Dataset cache mode')
 flags.DEFINE_string('camera_view', 'agentview', 'Camera view of data to load. Default is "agentview".')
 flags.DEFINE_list('image_size', [], 'H, W of images')
+flags.DEFINE_boolean('has_segmentation', True, 'Does dataset have segmentation masks')
 
 # post hoc analysis
 flags.DEFINE_string('re_eval', 'False', 'Re evaluate all available checkpoints saved.')
@@ -139,8 +140,8 @@ def main(argv):
         test_data_loader = load_hdf5_data(FLAGS.dataset_file, FLAGS.batch_size, data_type='val')
         prep_data = prep_data_test = lambda x: x
     else:
-        data_loader, prep_data = load_data(FLAGS.dataset_file, data_type='train')
-        test_data_loader, prep_data_test = load_data(FLAGS.dataset_file, data_type='valid')
+        data_loader, prep_data = load_data(FLAGS.dataset_file, data_type='train', seg=FLAGS.has_segmentation)
+        test_data_loader, prep_data_test = load_data(FLAGS.dataset_file, data_type='valid', seg=FLAGS.has_segmentation)
 
     wandb.init(
         project='fitvid-torch',

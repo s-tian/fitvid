@@ -72,7 +72,7 @@ def get_data_loader(dataset_paths, batch_size, video_len, video_dims, phase, dep
         sampler=None,  # no custom sampling logic (uniform sampling)
         batch_size=batch_size,
         shuffle=True,
-        num_workers=0,
+        num_workers=4,
         drop_last=True,  # don't provide last batch in dataset pass if it's less than 100 in size
     )
     return data_loader

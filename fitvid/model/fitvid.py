@@ -46,12 +46,13 @@ class FitVid(nn.Module):
         self.is_inference = kwargs['is_inference']
         self.skip_type = kwargs['skip_type']
 
-        if kwargs['loss_fn'] == 'l2':
-            self.loss_fn = F.mse_loss
-        elif kwargs['loss_fn'] == 'l1':
-            self.loss_fn = F.l1_loss
-        else:
-            raise NotImplementedError
+        if not kwargs['is_inference']:
+            if kwargs['loss_fn'] == 'l2':
+                self.loss_fn = F.mse_loss
+            elif kwargs['loss_fn'] == 'l1':
+                self.loss_fn = F.l1_loss
+            else:
+                raise NotImplementedError
 
         first_block_shape = [kwargs['first_block_shape'][-1]] + kwargs['first_block_shape'][:2]
         self.encoder = ModularEncoder(stage_sizes=kwargs['stage_sizes'], output_size=kwargs['g_dim'], num_base_filters=kwargs['num_base_filters'])
@@ -208,5 +209,5 @@ class FitVid(nn.Module):
     def load_parameters(self, path):
         # load everything
         state_dict = torch.load(path)
-        self.load_state_dict(state_dict, strict=True)
+        self.load_state_dict(state_dict, strict=False)
         print(f'Loaded checkpoint {path}')
