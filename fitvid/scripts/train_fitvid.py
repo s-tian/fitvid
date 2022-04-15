@@ -100,6 +100,9 @@ def main(argv):
     np.random.seed(0)
     os.environ['PYTHONHASHSEED'] = str(0)
 
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.enabled = True
+
     model = FitVid(stage_sizes=[int(i) for i in FLAGS.stage_sizes],
                    z_dim=FLAGS.z_dim,
                    g_dim=FLAGS.g_dim,
@@ -136,8 +139,9 @@ def main(argv):
     optimizer = torch.optim.Adam(model.parameters(), lr=FLAGS.lr, weight_decay=FLAGS.weight_decay)
 
     if FLAGS.hdf5_data:
-        data_loader = load_hdf5_data(FLAGS.dataset_file, FLAGS.batch_size, data_type='train')
-        test_data_loader = load_hdf5_data(FLAGS.dataset_file, FLAGS.batch_size, data_type='val')
+        image_size = [int(i) for i in FLAGS.image_size]
+        data_loader = load_hdf5_data(FLAGS.dataset_file, FLAGS.batch_size, image_size=image_size, data_type='train')
+        test_data_loader = load_hdf5_data(FLAGS.dataset_file, FLAGS.batch_size, image_size=image_size, data_type='val')
         prep_data = prep_data_test = lambda x: x
     else:
         data_loader, prep_data = load_data(FLAGS.dataset_file, data_type='train', seg=FLAGS.has_segmentation)

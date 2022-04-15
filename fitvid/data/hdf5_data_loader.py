@@ -205,9 +205,9 @@ class FixLenVideoDataset(BaseVideoDataset):
         return imp.load_source('dataset_spec', os.path.join(data_dir, 'dataset_spec.py')).dataset_spec
 
 
-def load_hdf5_data(data_dir, bs, data_type='train'):
+def load_hdf5_data(data_dir, bs, image_size=(64, 64), data_type='train'):
     data_dir = data_dir[0]
-    hp = AttrDict(img_sz=(64, 64),
+    hp = AttrDict(img_sz=image_size,
                   sel_len=12,
                   T=600)
     loader = FixLenVideoDataset(data_dir, hp, hp, phase=data_type).get_data_loader(bs)
