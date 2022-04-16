@@ -10,8 +10,12 @@ def build_visualization(gt, pred, gt_depth=None, gt_depth_pred=None, pred_depth=
 
     if gt_depth is None: # for depth only or no depth prediction case
         cmap = plt.get_cmap('jet_r')
-        gt = np.moveaxis(depth_to_rgb_im(gt.detach().cpu().numpy(), cmap), 4, 2)
-        pred = np.moveaxis(depth_to_rgb_im(pred.detach().cpu().numpy(), cmap), 4, 2)
+        if gt.shape[-2] == 1:
+            gt = np.moveaxis(depth_to_rgb_im(gt.detach().cpu().numpy(), cmap), 4, 2)
+            pred = np.moveaxis(depth_to_rgb_im(pred.detach().cpu().numpy(), cmap), 4, 2)
+        else:
+            gt = gt.detach().cpu().numpy() * 255
+            pred = pred.detach().cpu().numpy() * 255
 
         rgb_loss_im = generate_sample_metric_imgs(rgb_loss.detach().cpu().numpy(), tlen)
         image_rows = [gt, pred, rgb_loss_im]

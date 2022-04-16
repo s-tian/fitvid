@@ -154,19 +154,22 @@ class FitVid(nn.Module):
                     total_loss += weight * tv_loss
                 metrics['loss/tv'] = tv_loss
             elif loss == 'depth':
-                if weight != 0:
-                    depth_preds = self.depth_predictor(preds['rgb'])
-                    depth_loss_per_sample = self.depth_predictor.depth_loss(depth_preds, depth[:, 1:], reduce_batch=False)
-                    depth_loss = depth_loss_per_sample.mean()
-                    total_loss = total_loss + weight * depth_loss
-                else:
-                    with torch.no_grad():
+                if self.has_depth_predictor:
+                    if weight != 0:
                         depth_preds = self.depth_predictor(preds['rgb'])
                         depth_loss_per_sample = self.depth_predictor.depth_loss(depth_preds, depth[:, 1:], reduce_batch=False)
                         depth_loss = depth_loss_per_sample.mean()
-                preds['depth'] = depth_preds
-                metrics['loss/depth_loss'] = depth_loss
-                metrics['loss/depth_loss_per_sample'] = depth_loss_per_sample.detach()
+                        total_loss = total_loss + weight * depth_loss
+                    else:
+                        with torch.no_grad():
+                            depth_preds = self.depth_predictor(preds['rgb'])
+                            depth_loss_per_sample = self.depth_predictor.depth_loss(depth_preds, depth[:, 1:], reduce_batch=False)
+                            depth_loss = depth_loss_per_sample.mean()
+                    preds['depth'] = depth_preds
+                    metrics['loss/depth_loss'] = depth_loss
+                    metrics['loss/depth_loss_per_sample'] = depth_loss_per_sample.detach()
+                elif weight != 0:
+                    raise ValueError('Trying to use positive depth weight but no depth predictor!')
             else:
                 raise NotImplementedError(f'Loss {loss} not implemented!')
 
@@ -271,9 +274,11 @@ class FitVid(nn.Module):
         if compute_metrics:
             metrics.update(self.compute_metrics(preds, video[:, 1:]))
 
+        preds = dict(rgb=preds)
+
         if self.has_depth_predictor:
             with torch.no_grad():
-                depth_preds = self.depth_predictor(preds, time_axis=True)
+                depth_preds = self.depth_predictor(preds['rgb'], time_axis=True)
                 depth_video = batch['depth_video']
                 depth_loss_per_sample = self.depth_predictor.depth_loss(depth_preds, depth_video[:, 1:], reduce_batch=False)
                 depth_loss = depth_loss_per_sample.mean()
@@ -282,7 +287,7 @@ class FitVid(nn.Module):
                     'loss/depth_loss_per_sample': depth_loss_per_sample,
                 })
 
-        preds = dict(rgb=preds, depth=depth_preds)
+            preds['depth'] = depth_preds
         return metrics, preds
 
     def test(self, batch):

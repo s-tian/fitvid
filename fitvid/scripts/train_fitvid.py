@@ -68,6 +68,7 @@ flags.DEFINE_boolean('only_depth', False, 'Depth to depth prediction model.')
 flags.DEFINE_float('depth_weight', 0, 'Weight on depth objective.')
 flags.DEFINE_string('depth_model_path', None, 'Path to load pretrained depth model from.')
 flags.DEFINE_integer('depth_model_size', 256, 'Depth model size.')
+flags.DEFINE_integer('depth_start_epoch', 2, 'When to start training with depth objective.')
 
 # post hoc analysis
 flags.DEFINE_string('re_eval', 'False', 'Re evaluate all available checkpoints saved.')
@@ -209,7 +210,6 @@ def main(argv):
     scaler = GradScaler()
 
     for epoch in range(resume_epoch + 1, num_epochs):
-
         print(f'\nEpoch {epoch} / {num_epochs}')
         print('Evaluating')
         model.eval()
@@ -222,9 +222,9 @@ def main(argv):
                 with autocast() if FLAGS.fp16 else ExitStack() as ac:
                     metrics, eval_preds = model.module.evaluate(batch, compute_metrics=test_batch_idx % 500 == 0)
                     if test_batch_idx < num_batch_to_save:
-                        with torch.no_grad():
-                            gt_depth_preds = model.module.depth_predictor(batch['video'][:, 1:])
-                        if True:
+                        if depth_predictor_kwargs:
+                            with torch.no_grad():
+                                gt_depth_preds = model.module.depth_predictor(batch['video'][:, 1:])
                             test_videos_log = {
                                 'gt': batch['video'][:, 1:],
                                 'pred': eval_preds['rgb'],
@@ -236,11 +236,11 @@ def main(argv):
                                 'depth_loss': metrics['loss/depth_loss_per_sample'],
                             }
                         else:  # only depth case
-                                 test_videos_log = {
-                                 'gt': batch['video'][:, 1:],
-                                 'pred': eval_preds['rgb'],
-                                 'rgb_loss': metrics['loss/mse_per_sample'],
-                                 }
+                            test_videos_log = {
+                                'gt': batch['video'][:, 1:],
+                                'pred': eval_preds['rgb'],
+                                'rgb_loss': metrics['loss/mse_per_sample'],
+                            }
                         test_visualization = build_visualization(**test_videos_log)
                         wandb_log.update({'test_vis': wandb.Video(test_visualization, fps=4, format='gif')})
                 epoch_mse.append(metrics['loss/mse'].item())
@@ -263,6 +263,11 @@ def main(argv):
         print('Training')
         model.train()
 
+        if epoch < FLAGS.depth_start_epoch:
+            model.module.loss_weights['depth'] = 0
+        else:
+            model.module.loss_weights['depth'] = depth_weight
+
         for iter_item in enumerate(tqdm(data_loader)):
             wandb_log = {}
 
@@ -270,7 +275,7 @@ def main(argv):
             batch = dict_to_cuda(prep_data(batch))
             inputs = batch['video'], batch['actions'], batch['segmentation']
 
-            if True:
+            if depth_predictor_kwargs:
                 inputs = inputs + (batch['depth_video'],)
 
             optimizer.zero_grad()
@@ -298,10 +303,10 @@ def main(argv):
             train_losses.append(loss.item())
             train_mse.append(metrics['loss/mse'].item())
             if batch_idx < num_batch_to_save:
-                if True:
+                if depth_predictor_kwargs:
                     with torch.no_grad():
                         gt_depth_preds = model.module.depth_predictor(batch['video'][:, 1:])
-                if True:
+                if depth_predictor_kwargs:
                     train_videos_log = {
                         'gt': batch['video'][:, 1:],
                         'pred': preds['rgb'],
