@@ -4,7 +4,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from fitvid.model.nvae import ModularEncoder, ModularDecoder
+from fitvid.model.depth_predictor import DepthPredictor
+from fitvid.utils.depth_utils import mse_loss
+from fitvid.utils.pytorch_metrics import psnr, lpips, ssim, tv, PolicyFeatureL2Metric
 
+import piq
 
 class MultiGaussianLSTM(nn.Module):
     """Multi layer lstm with Gaussian output."""
@@ -39,34 +43,44 @@ class FitVid(nn.Module):
     def __init__(self, **kwargs):
         super(FitVid, self).__init__()
         self.config = kwargs
-        self.n_past = kwargs['n_past']
-        self.action_conditioned = kwargs['action_conditioned']
+        model_kwargs = kwargs['model_kwargs']
+        self.n_past = model_kwargs['n_past']
+        self.action_conditioned = model_kwargs['action_conditioned']
         self.beta = kwargs['beta']
-        self.stochastic = True
+        self.stochastic = model_kwargs['stochastic']
         self.is_inference = kwargs['is_inference']
-        self.skip_type = kwargs['skip_type']
+        self.skip_type = model_kwargs['skip_type']
+        self.loss_weights = kwargs['loss_weights']
+        self.loss_weights['kld'] = self.beta
+        self.multistep = kwargs['multistep']
 
-        if not kwargs['is_inference']:
-            if kwargs['loss_fn'] == 'l2':
-                self.loss_fn = F.mse_loss
-            elif kwargs['loss_fn'] == 'l1':
-                self.loss_fn = F.l1_loss
-            else:
-                raise NotImplementedError
-
-        first_block_shape = [kwargs['first_block_shape'][-1]] + kwargs['first_block_shape'][:2]
-        self.encoder = ModularEncoder(stage_sizes=kwargs['stage_sizes'], output_size=kwargs['g_dim'], num_base_filters=kwargs['num_base_filters'])
+        first_block_shape = [model_kwargs['first_block_shape'][-1]] + model_kwargs['first_block_shape'][:2]
+        self.encoder = ModularEncoder(stage_sizes=model_kwargs['stage_sizes'], output_size=model_kwargs['g_dim'], num_base_filters=model_kwargs['num_base_filters'])
         if self.stochastic:
-            self.prior = MultiGaussianLSTM(input_size=kwargs['g_dim'], output_size=kwargs['z_dim'], hidden_size=kwargs['rnn_size'], num_layers=1)
-            self.posterior = MultiGaussianLSTM(input_size=kwargs['g_dim'], output_size=kwargs['z_dim'], hidden_size=kwargs['rnn_size'], num_layers=1)
+            self.prior = MultiGaussianLSTM(input_size=model_kwargs['g_dim'], output_size=model_kwargs['z_dim'], hidden_size=model_kwargs['rnn_size'], num_layers=1)
+            self.posterior = MultiGaussianLSTM(input_size=model_kwargs['g_dim'], output_size=model_kwargs['z_dim'], hidden_size=model_kwargs['rnn_size'], num_layers=1)
         else:
             self.prior, self.posterior = None, None
 
-        self.decoder = ModularDecoder(first_block_shape=first_block_shape, input_size=kwargs['g_dim'], stage_sizes=kwargs['stage_sizes'],
-                                      num_base_filters=kwargs['num_base_filters'], skip_type=kwargs['skip_type'], expand=kwargs['expand_decoder'])
+        self.decoder = ModularDecoder(first_block_shape=first_block_shape, input_size=model_kwargs['g_dim'], stage_sizes=model_kwargs['stage_sizes'],
+                                      num_base_filters=model_kwargs['num_base_filters'], skip_type=model_kwargs['skip_type'], expand=model_kwargs['expand_decoder'])
 
-        input_size = self.get_input_size(kwargs['g_dim'], kwargs['action_size'], kwargs['z_dim'])
-        self.frame_predictor = MultiGaussianLSTM(input_size=input_size, output_size=kwargs['g_dim'], hidden_size=kwargs['rnn_size'], num_layers=2)
+        input_size = self.get_input_size(model_kwargs['g_dim'], model_kwargs['action_size'], model_kwargs['z_dim'])
+        self.frame_predictor = MultiGaussianLSTM(input_size=input_size, output_size=model_kwargs['g_dim'], hidden_size=model_kwargs['rnn_size'], num_layers=2)
+
+        self.lpips = piq.LPIPS()
+
+        if kwargs.get('depth_predictor', None):
+            self.has_depth_predictor = True
+            self.depth_predictor_cfg = kwargs['depth_predictor']
+            self.load_depth_predictor()
+        else:
+            self.has_depth_predictor = False
+
+        self.policy_feature_metric = False
+
+    def load_depth_predictor(self):
+        self.depth_predictor = DepthPredictor(**self.depth_predictor_cfg)
 
     def get_input(self, hidden, action, z):
         inp = [hidden]
@@ -89,17 +103,85 @@ class FitVid(nn.Module):
                      + torch.square(mean1 - mean2) * torch.exp(-logvar2))
         return torch.sum(kld) / batch_size
 
-    def forward(self, video, actions):
+    def compute_metrics(self, vid1, vid2):
+        with torch.no_grad():
+            metrics = {
+                'metrics/psnr': psnr(vid1, vid2),
+                'metrics/lpips': lpips(self.lpips, vid1, vid2),
+                'metrics/tv': tv(vid1),
+                'metrics/ssim': ssim(vid1, vid2),
+            }
+            if self.policy_feature_metric:
+                action_mse, feature_mse = self.policy_feature_metric(vid1, vid2)
+                metrics.update({
+                    'metrics/action_mse': action_mse,
+                    'metrics/policy_features': feature_mse,
+                })
+            return metrics
+
+    def forward(self, video, actions, segmentation=None, depth=None, compute_metrics=False):
         batch_size, video_len = video.shape[0], video.shape[1]
         video = video.view((batch_size*video_len,) + video.shape[2:]) # collapse first two dims
         hidden, skips = self.encoder(video)
         hidden = hidden.view((batch_size, video_len) + hidden.shape[1:])
         video = video.view((batch_size, video_len,) + video.shape[1:])  # reconstruct first two dims
         skips = {k: skips[k].view((batch_size, video_len,) + tuple(skips[k].shape[1:]))[:, self.n_past - 1] for k in skips.keys()}
-        loss, preds, metrics = self.calc_loss_helper(video, actions, hidden, skips, self.posterior, self.prior, self.frame_predictor)
+        preds, kld, means, logvars = self.predict_rgb(video, actions, hidden, skips, self.posterior, self.prior, self.frame_predictor)
+        loss, preds, metrics = self.compute_loss(preds, video, kld,
+                                                 segmentation=segmentation, depth=depth, compute_metrics=compute_metrics)
+        metrics.update({
+            'hist/mean': means,
+            'hist/logvars': logvars,
+        })
         return loss, preds, metrics
 
-    def calc_loss_helper(self, video, actions, hidden, skips, posterior, prior, frame_predictor):
+    def compute_loss(self, preds, video, kld, segmentation=None, depth=None, compute_metrics=False):
+        total_loss = 0
+        metrics = dict()
+        preds = dict(rgb=preds)
+        for loss, weight in self.loss_weights.items():
+            if loss == 'kld':
+                total_loss += weight * kld
+                metrics['loss/kld'] = kld
+            elif loss == 'rgb':
+                mse_per_sample = mse_loss(preds['rgb'], video[:, 1:], reduce_batch=False)
+                total_loss += mse_per_sample.mean()
+                metrics['loss/mse'] = mse_per_sample.mean()
+                metrics['loss/mse_per_sample'] = mse_per_sample.detach()
+            elif loss == 'tv':
+                if weight != 0:
+                    tv_loss = tv(preds)
+                    total_loss += weight * tv_loss
+                metrics['loss/tv'] = tv_loss
+            elif loss == 'depth':
+                if weight != 0:
+                    depth_preds = self.depth_predictor(preds['rgb'])
+                    depth_loss_per_sample = self.depth_predictor.depth_loss(depth_preds, depth[:, 1:], reduce_batch=False)
+                    depth_loss = depth_loss_per_sample.mean()
+                    total_loss = total_loss + weight * depth_loss
+                else:
+                    with torch.no_grad():
+                        depth_preds = self.depth_predictor(preds['rgb'])
+                        depth_loss_per_sample = self.depth_predictor.depth_loss(depth_preds, depth[:, 1:], reduce_batch=False)
+                        depth_loss = depth_loss_per_sample.mean()
+                preds['depth'] = depth_preds
+                metrics['loss/depth_loss'] = depth_loss
+                metrics['loss/depth_loss_per_sample'] = depth_loss_per_sample.detach()
+            else:
+                raise NotImplementedError(f'Loss {loss} not implemented!')
+
+        # Metrics
+        metrics.update({
+            'loss/all': total_loss,
+        })
+        if compute_metrics:
+            metrics.update(
+                self.compute_metrics(preds['rgb'], video[:, 1:])
+            )
+
+        return total_loss, preds, metrics
+
+    def predict_rgb(self, video, actions, hidden, skips, posterior, prior, frame_predictor):
         if self.is_inference:
             assert False
 
@@ -109,41 +191,47 @@ class FitVid(nn.Module):
         kld, means, logvars = torch.tensor(0).to(video), [], []
         # training
         h_preds = []
-        for i in range(1, video_len):
-            h, h_target = hidden[:, i - 1], hidden[:, i]
-            if self.stochastic:
+        if self.training and self.multistep:
+            preds = []
+            for i in range(1, video_len):
+                h, h_target = hidden[:, i - 1], hidden[:, i]
+                if i > self.n_past:
+                    h, _ = self.encoder(pred)
                 (z_t, mu, logvar), post_state = posterior(h_target, post_state)
                 (_, prior_mu, prior_logvar), prior_state = prior(h, prior_state)
-            else:
-                z_t = torch.zeros((h.shape[0], self.z_dim)).to(h)
-            inp = self.get_input(h, actions[:, i - 1], z_t)
-            (_, h_pred, _), pred_state = frame_predictor(inp, pred_state)
-            h_pred = torch.sigmoid(h_pred) # TODO notice
-            h_preds.append(h_pred)
-            if self.stochastic:
+                inp = self.get_input(h, actions[:, i - 1], z_t)
+                (_, h_pred, _), pred_state = frame_predictor(inp, pred_state)
+                h_pred = torch.sigmoid(h_pred)  # TODO notice
+                h_preds.append(h_pred)
                 means.append(mu)
                 logvars.append(logvar)
                 kld += self.kl_divergence(mu, logvar, prior_mu, prior_logvar, batch_size)
-        h_preds = torch.stack(h_preds, axis=1)
-        preds = self.decoder(h_preds, skips)
+                pred = self.decoder(h_pred[None, :], skips)[0]
+                preds.append(pred)
+            preds = torch.stack(preds, axis=1)
+        else:
+            for i in range(1, video_len):
+                h, h_target = hidden[:, i - 1], hidden[:, i]
+                (z_t, mu, logvar), post_state = posterior(h_target, post_state)
+                (_, prior_mu, prior_logvar), prior_state = prior(h, prior_state)
+                inp = self.get_input(h, actions[:, i - 1], z_t)
+                (_, h_pred, _), pred_state = frame_predictor(inp, pred_state)
+                h_pred = torch.sigmoid(h_pred)  # TODO notice
+                h_preds.append(h_pred)
+                means.append(mu)
+                logvars.append(logvar)
+                kld += self.kl_divergence(mu, logvar, prior_mu, prior_logvar, batch_size)
+            h_preds = torch.stack(h_preds, axis=1)
+            preds = self.decoder(h_preds, skips)
+
         if self.stochastic:
             means = torch.stack(means, axis=1)
             logvars = torch.stack(logvars, axis=1)
         else:
             means, logvars = torch.zeros(h.shape[0], video_len-1, 1).to(h), torch.zeros(h.shape[0], video_len-1, 1).to(h)
-        mse = self.loss_fn(preds, video[:, 1:])
-        loss = mse + kld * self.beta
-        # Metrics
-        metrics = {
-            'hist/mean': means,
-            'hist/logvars': logvars,
-            'loss/mse': mse,
-            'loss/kld': kld,
-            'loss/all': loss,
-        }
-        return loss, preds, metrics
+        return preds, kld, means, logvars
 
-    def evaluate(self, batch):
+    def evaluate(self, batch, compute_metrics=False):
         """Predict the full video conditioned on the first self.n_past frames. """
         if self.is_inference:
             assert False
@@ -173,8 +261,29 @@ class FitVid(nn.Module):
         preds = torch.stack(preds, axis=1)
 
         video = video.view((batch_size, video_len,) + video.shape[1:])  # reconstuct first two dims
-        mse = self.loss_fn(preds, video[:, 1:])
-        return mse, preds
+        mse_per_sample = mse_loss(preds, video[:, 1:], reduce_batch=False)
+        mse = mse_per_sample.mean()
+        metrics = {
+            'loss/mse': mse,
+            'loss/mse_per_sample': mse_per_sample,
+        }
+
+        if compute_metrics:
+            metrics.update(self.compute_metrics(preds, video[:, 1:]))
+
+        if self.has_depth_predictor:
+            with torch.no_grad():
+                depth_preds = self.depth_predictor(preds, time_axis=True)
+                depth_video = batch['depth_video']
+                depth_loss_per_sample = self.depth_predictor.depth_loss(depth_preds, depth_video[:, 1:], reduce_batch=False)
+                depth_loss = depth_loss_per_sample.mean()
+                metrics.update({
+                    'loss/depth_loss': depth_loss,
+                    'loss/depth_loss_per_sample': depth_loss_per_sample,
+                })
+
+        preds = dict(rgb=preds, depth=depth_preds)
+        return metrics, preds
 
     def test(self, batch):
         """Predict the full video conditioned on the first self.n_past frames. """
@@ -211,3 +320,7 @@ class FitVid(nn.Module):
         state_dict = torch.load(path)
         self.load_state_dict(state_dict, strict=False)
         print(f'Loaded checkpoint {path}')
+        if self.has_depth_predictor:
+            self.load_depth_predictor()  # reload pretrained depth model
+            print('Reloaded depth model')
+
