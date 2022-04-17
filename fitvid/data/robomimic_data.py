@@ -14,8 +14,8 @@ def get_image_name(cam):
         return f'{cam}_image'
 
 
-def get_data_loader(dataset_paths, batch_size, video_len, video_dims, phase, depth, view, cache_mode='lowdim', seg=True,
-                    only_depth=False):
+def get_data_loader(dataset_paths, batch_size, video_len, video_dims, phase, depth, normal, view, cache_mode='lowdim',
+                    seg=True, only_depth=False):
     """
     Get a data loader to sample batches of data.
     """
@@ -23,10 +23,11 @@ def get_data_loader(dataset_paths, batch_size, video_len, video_dims, phase, dep
 
     ObsUtils.initialize_obs_utils_with_obs_specs({
         "obs": {
-            "rgb": [imageview_name],
+            "rgb": [imageview_name, f'{view}_normal'],
             "depth": [f"{view}_depth"],
             # "scan": [f"{view}_segmentation_instance"]
-            "scan": [f"{view}_seg"]
+            "scan": [f"{view}_seg"],
+            # "normal": [f"{view}_normal"]
         }
     })
 
@@ -40,6 +41,8 @@ def get_data_loader(dataset_paths, batch_size, video_len, video_dims, phase, dep
             obs_keys = obs_keys + (f"{view}_depth",)
         if seg:
             obs_keys = obs_keys + (f"{view}_seg",)
+        if normal:
+            obs_keys = obs_keys + (f"{view}_normal",)
 
         dataset = SequenceDataset(
             hdf5_path=dataset_path,
@@ -78,11 +81,11 @@ def get_data_loader(dataset_paths, batch_size, video_len, video_dims, phase, dep
     return data_loader
 
 
-def load_dataset_robomimic_torch(dataset_path, batch_size, video_len, video_dims, phase, depth, view='agentview',
+def load_dataset_robomimic_torch(dataset_path, batch_size, video_len, video_dims, phase, depth, normal, view='agentview',
                                  cache_mode='low_dim', seg=True, only_depth=False):
     assert phase in ['train', 'valid'], f'Phase is not one of the acceptable values! Got {phase}'
 
-    loader = get_data_loader(dataset_path, batch_size, video_len, video_dims, phase, depth, view, cache_mode, seg,
+    loader = get_data_loader(dataset_path, batch_size, video_len, video_dims, phase, depth, normal, view, cache_mode, seg,
                              only_depth)
 
     def prepare_data(xs):
@@ -114,6 +117,8 @@ def load_dataset_robomimic_torch(dataset_path, batch_size, video_len, video_dims
             data_dict['segmentation'] = None
         if depth and not only_depth:
             data_dict['depth_video'] = xs['obs'][f'{view}_depth']
+        if normal:
+            data_dict['normal'] = xs['obs'][f'{view}_normal']
         return data_dict
 
     return loader, prepare_data
