@@ -70,12 +70,16 @@ flags.DEFINE_string('depth_model_path', None, 'Path to load pretrained depth mod
 flags.DEFINE_integer('depth_model_size', 256, 'Depth model size.')
 flags.DEFINE_integer('depth_start_epoch', 2, 'When to start training with depth objective.')
 
+# normal model
+flags.DEFINE_float('normal_weight', 0, 'Weight on normal objective.')
+flags.DEFINE_string('normal_model_path', None, 'Path to load pretrained depth model from.')
+
 # post hoc analysis
 flags.DEFINE_string('re_eval', 'False', 'Re evaluate all available checkpoints saved.')
 flags.DEFINE_integer('re_eval_bs', 20, 'bs override')
 
 
-def load_data(dataset_files, data_type='train', depth=False, seg=True):
+def load_data(dataset_files, data_type='train', depth=False, normal=False, seg=True):
     video_len = FLAGS.n_past + FLAGS.n_future
     if FLAGS.image_size:
         assert len(FLAGS.image_size) == 2, "Image size should be (H, W)"
@@ -83,7 +87,7 @@ def load_data(dataset_files, data_type='train', depth=False, seg=True):
     else:
         image_size = None
     return load_dataset_robomimic_torch(dataset_files, FLAGS.batch_size, video_len, image_size,
-                                        data_type, depth, view=FLAGS.camera_view, cache_mode=FLAGS.cache_mode,
+                                        data_type, depth, normal, view=FLAGS.camera_view, cache_mode=FLAGS.cache_mode,
                                         seg=seg, only_depth=False)
 
 
@@ -120,12 +124,23 @@ def main(argv):
     else:
         depth_predictor_kwargs = None
 
-    depth_weight = FLAGS.depth_weight / (FLAGS.depth_weight + 1)
+    if FLAGS.normal_model_path:
+        normal_predictor_kwargs = {
+            'pretrained_weight_path': FLAGS.normal_model_path,
+        }
+    else:
+        normal_predictor_kwargs = None
+
+    other_weights = FLAGS.depth_weight + FLAGS.normal_weight
+    depth_weight = FLAGS.depth_weight / (other_weights + 1)
+    normal_weight = FLAGS.normal_weight / (other_weights + 1)
+    other_weights = other_weights / (other_weights + 1)
 
     loss_weights = {
         'kld': FLAGS.beta,
-        'rgb': 1 - depth_weight,
+        'rgb': 1 - other_weights,
         'depth': depth_weight,
+        'normal': normal_weight,
     }
 
     model_kwargs = dict(
@@ -149,6 +164,7 @@ def main(argv):
                    multistep=FLAGS.multistep,
                    is_inference=False,
                    depth_predictor=depth_predictor_kwargs,
+                   normal_predictor=normal_predictor_kwargs,
                    loss_weights=loss_weights,
                    )
 
@@ -178,15 +194,19 @@ def main(argv):
     else:
         if FLAGS.debug:
             data_loader, prep_data = load_data(FLAGS.dataset_file, data_type='valid',
-                                               depth=FLAGS.depth_model_path, seg=FLAGS.has_segmentation)
+                                               depth=FLAGS.depth_model_path, normal=FLAGS.normal_model_path,
+                                               seg=FLAGS.has_segmentation)
         else:
-            data_loader, prep_data = load_data(FLAGS.dataset_file, data_type='train', seg=FLAGS.has_segmentation)
+            data_loader, prep_data = load_data(FLAGS.dataset_file, data_type='train',
+                                               depth=FLAGS.depth_model_path, normal=FLAGS.normal_model_path,
+                                               seg=FLAGS.has_segmentation)
         test_data_loader, prep_data_test = load_data(FLAGS.dataset_file, data_type='valid',
                                                      depth=FLAGS.depth_model_path,
+                                                     normal=FLAGS.normal_model_path,
                                                      seg=FLAGS.has_segmentation)
 
     wandb.init(
-        project='fitvid-torch',
+        project='perceptual-metrics',
         reinit=True,
         mode='online' if FLAGS.wandb_online else 'offline'
     )
@@ -234,15 +254,35 @@ def main(argv):
                                 'rgb_loss': metrics['loss/mse_per_sample'],
                                 'depth_loss_weight': model.module.loss_weights['depth'],
                                 'depth_loss': metrics['loss/depth_loss_per_sample'],
+                                'name': 'Depth',
                             }
+                            test_depth_visualization = build_visualization(**test_videos_log)
+                            wandb_log.update(
+                                {'test_depth_vis': wandb.Video(test_depth_visualization, fps=4, format='gif')})
                         else:  # only depth case
                             test_videos_log = {
                                 'gt': batch['video'][:, 1:],
                                 'pred': eval_preds['rgb'],
                                 'rgb_loss': metrics['loss/mse_per_sample'],
                             }
-                        test_visualization = build_visualization(**test_videos_log)
-                        wandb_log.update({'test_vis': wandb.Video(test_visualization, fps=4, format='gif')})
+                            test_visualization = build_visualization(**test_videos_log)
+                            wandb_log.update({'test_vis': wandb.Video(test_visualization, fps=4, format='gif')})
+                        if normal_predictor_kwargs:
+                            with torch.no_grad():
+                                gt_normal_preds = model.module.normal_predictor(batch['video'][:, 1:])
+                            test_videos_log = {
+                                'gt': batch['video'][:, 1:],
+                                'pred': eval_preds['rgb'],
+                                'gt_depth': batch['normal'][:, 1:],
+                                'gt_depth_pred': gt_normal_preds,
+                                'pred_depth': eval_preds['normal'],
+                                'rgb_loss': metrics['loss/mse_per_sample'],
+                                'depth_loss_weight': model.module.loss_weights['normal'],
+                                'depth_loss': metrics['loss/normal_loss_per_sample'],
+                                'name': 'Normal',
+                            }
+                            test_normal_visualization = build_visualization(**test_videos_log)
+                            wandb_log.update({'test_normal_vis': wandb.Video(test_normal_visualization, fps=4, format='gif')})
                 epoch_mse.append(metrics['loss/mse'].item())
                 wandb_log.update({f'eval/{k}': v for k, v in metrics.items()})
                 wandb.log(wandb_log)
@@ -265,8 +305,10 @@ def main(argv):
 
         if epoch < FLAGS.depth_start_epoch:
             model.module.loss_weights['depth'] = 0
+            model.module.loss_weights['normal'] = 0
         else:
             model.module.loss_weights['depth'] = depth_weight
+            model.module.loss_weights['normal'] = normal_weight
 
         for iter_item in enumerate(tqdm(data_loader)):
             wandb_log = {}
@@ -277,6 +319,13 @@ def main(argv):
 
             if depth_predictor_kwargs:
                 inputs = inputs + (batch['depth_video'],)
+            else:
+                inputs = inputs + (None, )
+
+            if normal_predictor_kwargs:
+                inputs = inputs + (batch['normal'],)
+            else:
+                inputs = inputs + (None,)
 
             optimizer.zero_grad()
             with autocast() if FLAGS.fp16 else ExitStack() as ac:
@@ -317,14 +366,32 @@ def main(argv):
                         'depth_loss_weight': model.module.loss_weights['depth'],
                         'depth_loss': metrics['loss/depth_loss_per_sample'],
                     }
+                    train_depth_visualization = build_visualization(**train_videos_log)
+                    wandb_log.update({'train_depth_vis': wandb.Video(train_depth_visualization, fps=4, format='gif')})
                 else:
                     train_videos_log = {
                         'gt': batch['video'][:, 1:],
                         'pred': preds['rgb'],
                         'rgb_loss': metrics['loss/mse_per_sample'],
                     }
-                train_visualization = build_visualization(**train_videos_log)
-                wandb_log.update({'train_vis': wandb.Video(train_visualization, fps=4, format='gif')})
+                    train_visualization = build_visualization(**train_videos_log)
+                    wandb_log.update({'train_vis': wandb.Video(train_visualization, fps=4, format='gif')})
+                if normal_predictor_kwargs:
+                    with torch.no_grad():
+                        gt_normal_preds = model.module.normal_predictor(batch['video'][:, 1:])
+                    train_videos_log = {
+                        'gt': batch['video'][:, 1:],
+                        'pred': preds['rgb'],
+                        'gt_depth': batch['normal'][:, 1:],
+                        'gt_depth_pred': gt_normal_preds,
+                        'pred_depth': preds['normal'],
+                        'rgb_loss': metrics['loss/mse_per_sample'],
+                        'depth_loss_weight': model.module.loss_weights['normal'],
+                        'depth_loss': metrics['loss/normal_loss_per_sample'],
+                        'name': 'Normal',
+                    }
+                    train_normal_visualization = build_visualization(**train_videos_log)
+                    wandb_log.update({'train_normal_vis': wandb.Video(train_normal_visualization, fps=4, format='gif')})
 
             wandb_log.update({f'train/{k}': v for k, v in metrics.items()})
             wandb.log(wandb_log)

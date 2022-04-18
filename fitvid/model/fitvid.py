@@ -77,7 +77,21 @@ class FitVid(nn.Module):
         else:
             self.has_depth_predictor = False
 
+        if kwargs.get('normal_predictor', None):
+            self.has_normal_predictor = True
+            self.normal_predictor_cfg = kwargs['normal_predictor']
+            self.load_normal_predictor()
+        else:
+            self.has_normal_predictor = False
+
         self.policy_feature_metric = False
+
+    def load_normal_predictor(self):
+        from fitvid.scripts.train_surface_normal_model import ConvPredictor
+        self.normal_predictor = ConvPredictor()
+        self.normal_predictor.load_state_dict(torch.load(self.normal_predictor_cfg['pretrained_weight_path']))
+        for param in self.normal_predictor.parameters():
+            param.requires_grad = False
 
     def load_depth_predictor(self):
         self.depth_predictor = DepthPredictor(**self.depth_predictor_cfg)
@@ -119,7 +133,7 @@ class FitVid(nn.Module):
                 })
             return metrics
 
-    def forward(self, video, actions, segmentation=None, depth=None, compute_metrics=False):
+    def forward(self, video, actions, segmentation=None, depth=None, normal=None, compute_metrics=False):
         batch_size, video_len = video.shape[0], video.shape[1]
         video = video.view((batch_size*video_len,) + video.shape[2:]) # collapse first two dims
         hidden, skips = self.encoder(video)
@@ -128,14 +142,14 @@ class FitVid(nn.Module):
         skips = {k: skips[k].view((batch_size, video_len,) + tuple(skips[k].shape[1:]))[:, self.n_past - 1] for k in skips.keys()}
         preds, kld, means, logvars = self.predict_rgb(video, actions, hidden, skips, self.posterior, self.prior, self.frame_predictor)
         loss, preds, metrics = self.compute_loss(preds, video, kld,
-                                                 segmentation=segmentation, depth=depth, compute_metrics=compute_metrics)
+                                                 segmentation=segmentation, depth=depth, normal=normal, compute_metrics=compute_metrics)
         metrics.update({
             'hist/mean': means,
             'hist/logvars': logvars,
         })
         return loss, preds, metrics
 
-    def compute_loss(self, preds, video, kld, segmentation=None, depth=None, compute_metrics=False):
+    def compute_loss(self, preds, video, kld, segmentation=None, depth=None, normal=None, compute_metrics=False):
         total_loss = 0
         metrics = dict()
         preds = dict(rgb=preds)
@@ -170,6 +184,21 @@ class FitVid(nn.Module):
                     metrics['loss/depth_loss_per_sample'] = depth_loss_per_sample.detach()
                 elif weight != 0:
                     raise ValueError('Trying to use positive depth weight but no depth predictor!')
+            elif loss == 'normal':
+                if self.has_normal_predictor:
+                    if weight != 0:
+                        normal_preds = self.normal_predictor(preds['rgb'])
+                        normal_loss_per_sample = mse_loss(normal_preds, normal[:, 1:], reduce_batch=False)
+                        normal_loss = normal_loss_per_sample.mean()
+                        total_loss = total_loss + weight * normal_loss
+                    else:
+                        with torch.no_grad():
+                            normal_preds = self.normal_predictor(preds['rgb'])
+                            normal_loss_per_sample = mse_loss(normal_preds, normal[:, 1:], reduce_batch=False)
+                            normal_loss = normal_loss_per_sample.mean()
+                    preds['normal'] = normal_preds
+                    metrics['loss/normal_loss'] = normal_loss
+                    metrics['loss/normal_loss_per_sample'] = normal_loss_per_sample.detach()
             else:
                 raise NotImplementedError(f'Loss {loss} not implemented!')
 
@@ -288,6 +317,18 @@ class FitVid(nn.Module):
                 })
 
             preds['depth'] = depth_preds
+
+        if self.has_normal_predictor:
+            with torch.no_grad():
+                normal_preds = self.normal_predictor(preds['rgb'], time_axis=True)
+                normal_video = batch['normal']
+                normal_loss_per_sample = mse_loss(normal_preds, normal_video[:, 1:], reduce_batch=False)
+                normal_loss = normal_loss_per_sample.mean()
+                metrics.update({
+                    'loss/normal_loss': normal_loss,
+                    'loss/normal_loss_per_sample': normal_loss_per_sample,
+                })
+            preds['normal'] = normal_preds
         return metrics, preds
 
     def test(self, batch):

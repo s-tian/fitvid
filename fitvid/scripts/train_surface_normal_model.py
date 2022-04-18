@@ -42,7 +42,7 @@ class ResidualBlock(nn.Module):
 
 class ConvPredictor(nn.Module):
 
-    def __init__(self, nonlinearity):
+    def __init__(self):
         super().__init__()
         self.net = nn.Sequential(
             nn.Conv2d(
@@ -68,8 +68,22 @@ class ConvPredictor(nn.Module):
             nn.Tanh()
         )
 
-    def forward(self, x):
-        return self.net(x)
+    def forward(self, x, time_axis=True):
+        if time_axis:
+            shape = x.shape
+            try:
+                x= x.view(
+                    (shape[0] * shape[1],) + shape[2:])  # collapse batch*time dims [b0t0, b0t1, b0t2... b1t0, b1t1, b1t2...]
+            except Exception as e:
+                # if the dimensions span across subspaces, need to use reshape
+                x= x.reshape(
+                    (shape[0] * shape[1],) + shape[2:])  # collapse batch*time dims [b0t0, b0t1, b0t2... b1t0, b1t1, b1t2...]
+        x = self.net(x)
+        if time_axis:
+            x = x.view((shape[0], shape[1],) + tuple(x.shape[1:]))
+        else:
+            x = x
+        return x
 
 
 def load_model(model_name, path):

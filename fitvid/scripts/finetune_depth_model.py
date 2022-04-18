@@ -44,9 +44,22 @@ class TwoConvLayers(nn.Module):
             nn.Tanh(),
         )
 
-    def forward(self, x):
+    def forward(self, x, time_axis=True):
+        if time_axis:
+            shape = x.shape
+            try:
+                x= x.view(
+                    (shape[0] * shape[1],) + shape[2:])  # collapse batch*time dims [b0t0, b0t1, b0t2... b1t0, b1t1, b1t2...]
+            except Exception as e:
+                # if the dimensions span across subspaces, need to use reshape
+                x= pred_frame.reshape(
+                    (shape[0] * shape[1],) + shape[2:])  # collapse batch*time dims [b0t0, b0t1, b0t2... b1t0, b1t1, b1t2...]
         x = self.conv1(x)
         x = self.conv2(x)
+        if time_axis:
+            x = x.view((shape[0], shape[1],) + tuple(x.shape[1:]))
+        else:
+            x = x
         return x
 
 
@@ -80,8 +93,8 @@ def load_model(model_name, path):
 
 
 def get_dataloaders(dataset_files, bs, dims, view):
-    train_load = load_dataset_robomimic_torch(dataset_files, batch_size=bs, video_len=10, video_dims=dims, phase='train', depth=True, view=view, cache_mode='all_nogetitem')
-    val_load = load_dataset_robomimic_torch(dataset_files, batch_size=bs, video_len=10, video_dims=dims, phase='valid', depth=True, view=view, cache_mode='all_nogetitem')
+    train_load = load_dataset_robomimic_torch(dataset_files, batch_size=bs, video_len=10, video_dims=dims, phase='train', depth=True, normal=False, view=view, cache_mode='lowdim')
+    val_load = load_dataset_robomimic_torch(dataset_files, batch_size=bs, video_len=10, video_dims=dims, phase='valid', depth=True, normal=False, view=view, cache_mode='lowdim')
     return train_load, val_load
 
 
@@ -95,7 +108,7 @@ def flatten_dims(img):
 def loss_fn(pred, actual):
     # pred = normalize_depth(pred, 1)
     # actual = normalize_depth(actual, 1)
-    return F.mse_loss(pred, actual) + 0.1 * tv(pred)
+    return F.mse_loss(pred, actual) + 0.0 * tv(pred)
 
 
 def scale_invariant_loss(pred, actual):
