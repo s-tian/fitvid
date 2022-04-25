@@ -54,6 +54,7 @@ flags.DEFINE_string('skip_type', 'residual', 'skip type: residual, concat, no_sk
 flags.DEFINE_string('output_dir', None, 'Path to model checkpoints/summaries.')
 flags.DEFINE_integer('save_freq', 10, 'number of steps between checkpoints')
 flags.DEFINE_boolean('wandb_online', None, 'Use wandb online mode (probably should disable on cluster)')
+flags.DEFINE_string('project', 'perceptual-metrics', 'wandb project name')
 
 # Data
 flags.DEFINE_spaceseplist('dataset_file', [], 'Dataset to load.')
@@ -73,6 +74,11 @@ flags.DEFINE_integer('depth_start_epoch', 2, 'When to start training with depth 
 # normal model
 flags.DEFINE_float('normal_weight', 0, 'Weight on normal objective.')
 flags.DEFINE_string('normal_model_path', None, 'Path to load pretrained depth model from.')
+
+# Policy networks
+flags.DEFINE_float('policy_weight', 0, 'Weight on policy loss.')
+flags.DEFINE_spaceseplist('policy_network_paths', [], 'Policy feature network locations.')
+flags.DEFINE_string('policy_network_layer', 'fc0', 'Layer to use for policy feature network.')
 
 # post hoc analysis
 flags.DEFINE_string('re_eval', 'False', 'Re evaluate all available checkpoints saved.')
@@ -118,7 +124,7 @@ def main(argv):
     if FLAGS.depth_model_path:
         depth_predictor_kwargs = {
             'depth_model_type': 'mns',
-            'pretrained_weight_path': FLAGS.depth_model_path,
+            'pretrained_weight_path': os.path.abspath(FLAGS.depth_model_path),
             'input_size': FLAGS.depth_model_size,
         }
     else:
@@ -126,21 +132,32 @@ def main(argv):
 
     if FLAGS.normal_model_path:
         normal_predictor_kwargs = {
-            'pretrained_weight_path': FLAGS.normal_model_path,
+            'pretrained_weight_path': os.path.abspath(FLAGS.normal_model_path),
         }
     else:
         normal_predictor_kwargs = None
+
+    if FLAGS.policy_network_paths:
+        policy_network_kwargs = {
+            'pretrained_weight_paths': [os.path.abspath(p) for p in FLAGS.policy_network_paths],
+            'layer': FLAGS.policy_network_layer
+        }
+    else:
+        policy_network_kwargs = None
 
     other_weights = FLAGS.depth_weight + FLAGS.normal_weight
     depth_weight = FLAGS.depth_weight / (other_weights + 1)
     normal_weight = FLAGS.normal_weight / (other_weights + 1)
     other_weights = other_weights / (other_weights + 1)
 
+    policy_weight = FLAGS.policy_weight
+
     loss_weights = {
         'kld': FLAGS.beta,
         'rgb': 1 - other_weights,
         'depth': depth_weight,
         'normal': normal_weight,
+        'policy': policy_weight,
     }
 
     model_kwargs = dict(
@@ -165,6 +182,7 @@ def main(argv):
                    is_inference=False,
                    depth_predictor=depth_predictor_kwargs,
                    normal_predictor=normal_predictor_kwargs,
+                   policy_networks=policy_network_kwargs,
                    loss_weights=loss_weights,
                    )
 
@@ -206,7 +224,7 @@ def main(argv):
                                                      seg=FLAGS.has_segmentation)
 
     wandb.init(
-        project='perceptual-metrics',
+        project=FLAGS.project,
         reinit=True,
         mode='online' if FLAGS.wandb_online else 'offline'
     )
@@ -240,7 +258,7 @@ def main(argv):
                 test_batch_idx, batch = iter_item
                 batch = dict_to_cuda(prep_data_test(batch))
                 with autocast() if FLAGS.fp16 else ExitStack() as ac:
-                    metrics, eval_preds = model.module.evaluate(batch, compute_metrics=test_batch_idx % 500 == 0)
+                    metrics, eval_preds = model.module.evaluate(batch, compute_metrics=test_batch_idx % 1 == 0)
                     if test_batch_idx < num_batch_to_save:
                         if depth_predictor_kwargs:
                             with torch.no_grad():
@@ -288,7 +306,7 @@ def main(argv):
                 wandb.log(wandb_log)
                 if FLAGS.debug and test_batch_idx > 25:
                     break
-                if test_batch_idx == 30:
+                if test_batch_idx == 50:
                     break
             test_mse.append(np.mean(epoch_mse))
         print(f'Test MSE: {epoch_mse[-1]}')
@@ -315,7 +333,10 @@ def main(argv):
 
             batch_idx, batch = iter_item
             batch = dict_to_cuda(prep_data(batch))
-            inputs = batch['video'], batch['actions'], batch['segmentation']
+            if 'segmentation' in batch:
+                inputs = batch['video'], batch['actions'], batch['segmentation']
+            else:
+                inputs = batch['video'], batch['actions'], None
 
             if depth_predictor_kwargs:
                 inputs = inputs + (batch['depth_video'],)

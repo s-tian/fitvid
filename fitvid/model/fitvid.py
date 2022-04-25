@@ -53,6 +53,7 @@ class FitVid(nn.Module):
         self.loss_weights = kwargs['loss_weights']
         self.loss_weights['kld'] = self.beta
         self.multistep = kwargs['multistep']
+        self.z_dim = model_kwargs['z_dim']
 
         first_block_shape = [model_kwargs['first_block_shape'][-1]] + model_kwargs['first_block_shape'][:2]
         self.encoder = ModularEncoder(stage_sizes=model_kwargs['stage_sizes'], output_size=model_kwargs['g_dim'], num_base_filters=model_kwargs['num_base_filters'])
@@ -84,7 +85,17 @@ class FitVid(nn.Module):
         else:
             self.has_normal_predictor = False
 
-        self.policy_feature_metric = False
+        if kwargs.get('policy_networks', None):
+            self.policy_feature_metric = True
+            self.policy_networks_cfg = kwargs['policy_networks']
+            self.load_policy_networks()
+        else:
+            self.policy_feature_metric = False
+
+    def load_policy_networks(self):
+        layer = self.policy_networks_cfg['layer']
+        paths = self.policy_networks_cfg['pretrained_weight_paths']
+        self.policy_network_losses = nn.ModuleList([PolicyFeatureL2Metric(path, layer) for path in paths])
 
     def load_normal_predictor(self):
         from fitvid.scripts.train_surface_normal_model import ConvPredictor
@@ -126,11 +137,12 @@ class FitVid(nn.Module):
                 'metrics/ssim': ssim(vid1, vid2),
             }
             if self.policy_feature_metric:
-                action_mse, feature_mse = self.policy_feature_metric(vid1, vid2)
-                metrics.update({
-                    'metrics/action_mse': action_mse,
-                    'metrics/policy_features': feature_mse,
-                })
+                for i, policy_feature_metric in enumerate(self.policy_network_losses):
+                    action_mse, feature_mse = policy_feature_metric(vid1, vid2)
+                    metrics.update({
+                        f'metrics/action_{i}_mse': action_mse,
+                        f'metrics/policy_{i}_feature_mse': feature_mse,
+                    })
             return metrics
 
     def forward(self, video, actions, segmentation=None, depth=None, normal=None, compute_metrics=False):
@@ -167,6 +179,15 @@ class FitVid(nn.Module):
                     tv_loss = tv(preds)
                     total_loss += weight * tv_loss
                 metrics['loss/tv'] = tv_loss
+            elif loss == 'policy':
+                if weight != 0 and self.policy_feature_metric:
+                    feature_losses = []
+                    for policy_feature_metric in self.policy_network_losses:
+                        action_mse, feature_mse = policy_feature_metric(preds['rgb'], video[:, 1:])
+                        feature_losses.append(feature_mse)
+                    feature_mse = torch.stack(feature_losses).mean()
+                    metrics['loss/policy_feature_loss'] = feature_mse
+                    total_loss = total_loss + weight * feature_mse
             elif loss == 'depth':
                 if self.has_depth_predictor:
                     if weight != 0:
@@ -369,4 +390,9 @@ class FitVid(nn.Module):
         if self.has_depth_predictor:
             self.load_depth_predictor()  # reload pretrained depth model
             print('Reloaded depth model')
-
+        if self.has_normal_predictor:
+            self.load_normal_predictor()
+            print('Reloaded normal model')
+        if self.policy_feature_metric:
+            self.load_policy_networks()
+            print('Reloaded policy networks')

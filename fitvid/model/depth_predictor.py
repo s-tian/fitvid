@@ -67,11 +67,10 @@ class DepthPredictor(nn.Module):
                 pred_frame = pred_frame.reshape(
                     (shape[0] * shape[1],) + shape[2:])  # collapse batch*time dims [b0t0, b0t1, b0t2... b1t0, b1t1, b1t2...]
         pred_frame_norm = (pred_frame - self.depth_head_mean) / self.depth_head_std # normalize as done for pretrained MiDaS
-
         if self.input_size % pred_frame_norm.shape[-1] != 0:
             raise ValueError('depth model and frame pred size mismatch!')
         if self.input_size != pred_frame.shape[-1]:
-            pred_frame_norm = torch.nn.Upsample(scale_factor=self.input_size //pred_frame_norm.shape[-1])(pred_frame_norm)
+            pred_frame_norm = torch.nn.Upsample(scale_factor=self.input_size // pred_frame_norm.shape[-1])(pred_frame_norm)
         depth_pred = self.depth_head(pred_frame_norm)[:, None].float()
         # normalize to [0, 1]
         if self.input_size != pred_frame.shape[-1]:
