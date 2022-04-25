@@ -10,9 +10,10 @@ import matplotlib.pyplot as plt
 import imageio
 from torchvision.transforms import Resize, RandomResizedCrop, ColorJitter
 import imp
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 import os
 import moviepy.editor as mpy
+
 
 class AttrDict(dict):
     __setattr__ = dict.__setitem__
@@ -93,12 +94,11 @@ class FixLenVideoDataset(BaseVideoDataset):
         random.shuffle(self.filenames)
 
         self._data_conf = data_conf
-        self.duplicates_per_file = duplicates
         self.traj_per_file = self.get_traj_per_file(self.filenames[0])
 
-        if hasattr(data_conf, 'T'):
-            self.T = data_conf.T
-        else: self.T = self.get_total_seqlen(self.filenames[0])
+        # if hasattr(data_conf, 'T'):
+        #     self.T = data_conf.T
+        # else: self.T = self.get_total_seqlen(self.filenames[0])
 
         self.flatten_im = False
         self.filter_repeated_tail = False
@@ -109,6 +109,7 @@ class FixLenVideoDataset(BaseVideoDataset):
         #self.transform = RandomResizedCrop((self.img_sz[0], self.img_sz[1]), scale=(0.8, 1.0), ratio=(1., 1.))
         self.transform = ColorJitter(brightness=0.1, contrast=0.1)
         # Load data into RAM
+        self.traj_lengths = []
         for file_index in range(len(self.filenames)):
             path = self.filenames[file_index]
             if path not in self.cached_data:
@@ -126,16 +127,22 @@ class FixLenVideoDataset(BaseVideoDataset):
                 # if self._data_conf.sel_len != -1:
                 # data_dict = self.sample_rand_shifts(data_dict)
                 self.cached_data[path] = data_dict
+                self.traj_lengths.append(data_dict['images'].shape[0])
 
         print(phase)
         print(len(self.filenames))
 
     def _get_filenames(self):
-        assert 'hdf5' not in self.data_dir, "hdf5 most not be contained in the data dir!"
-        filenames = sorted(glob.glob(os.path.join(self.data_dir, os.path.join('hdf5', self.phase) + '/*')))
-        if not filenames:
-            raise RuntimeError('No filenames found in {}'.format(self.data_dir))
-        return filenames
+        if not isinstance(self.data_dir, list):
+            self.data_dir = [self.data_dir]
+        all_filenames = []
+        for data_dir in self.data_dir:
+            assert 'hdf5' not in data_dir, "hdf5 most not be contained in the data dir!"
+            filenames = sorted(glob.glob(os.path.join(data_dir, os.path.join('hdf5', self.phase) + '/*')))
+            if not filenames:
+                raise RuntimeError('No filenames found in {}'.format(self.data_dir))
+            all_filenames.extend(filenames)
+        return all_filenames
 
     def get_traj_per_file(self, path):
         with h5py.File(path, 'r') as F:
@@ -146,7 +153,7 @@ class FixLenVideoDataset(BaseVideoDataset):
             return F['traj0']['images'][:].shape[0]
 
     def __getitem__(self, index):
-        file_index = (index // self.traj_per_file) // self.duplicates_per_file
+        file_index = (index // self.traj_per_file)
         path = self.filenames[file_index]
         segment = self.sample_rand_shifts(self.cached_data[path])
         return {
@@ -165,7 +172,8 @@ class FixLenVideoDataset(BaseVideoDataset):
     def sample_rand_shifts(self, data_dict):
         """ This function processes data tensors so as to have length equal to max_seq_len
         by sampling / padding if necessary """
-        offset = np.random.randint(0, self.T - self._data_conf.sel_len, 1)
+        T = data_dict['images'].shape[0]
+        offset = np.random.randint(0, T - self._data_conf.sel_len + 1, 1)
         data_dict = map_dict(lambda tensor: self._croplen(tensor, offset, self._data_conf.sel_len), data_dict)
         #if 'actions' in data_dict:
         #    data_dict.actions = data_dict.actions[:-1]
@@ -185,7 +193,7 @@ class FixLenVideoDataset(BaseVideoDataset):
         return images
 
     def __len__(self):
-        return len(self.filenames) * self.traj_per_file * self.duplicates_per_file
+        return len(self.filenames) * self.traj_per_file
 
     @staticmethod
     def _croplen(val, offset, target_length):
@@ -204,32 +212,39 @@ class FixLenVideoDataset(BaseVideoDataset):
     def get_dataset_spec(data_dir):
         return imp.load_source('dataset_spec', os.path.join(data_dir, 'dataset_spec.py')).dataset_spec
 
+    def get_data_loader(self, batch_size):
+        print('len {} dataset {}'.format(self.phase, len(self)))
+        sampler = WeightedRandomSampler(self.traj_lengths, len(self)*500)
+        return DataLoader(self, batch_size=batch_size, shuffle=False, num_workers=self.n_worker,
+                                  drop_last=True, sampler=sampler)
+
 
 def load_hdf5_data(data_dir, bs, image_size=(64, 64), data_type='train'):
-    data_dir = data_dir[0]
+    data_dir = data_dir
     hp = AttrDict(img_sz=image_size,
-                  sel_len=12,
+                  sel_len=9,
                   T=600)
     loader = FixLenVideoDataset(data_dir, hp, hp, phase=data_type).get_data_loader(bs)
     return loader
 
 
 if __name__ == '__main__':
-    data_dir = '/viscam/u/stian/ff_data/ferro_600_3Hz/'
+    data_dir = ['/viscam/u/stian/ff_data/ferro_600_3Hz_fixfix/', '/viscam/u/stian/ff_data/on_policy']
     hp = AttrDict(img_sz=(64, 64),
-                  sel_len=12,
+                  sel_len=9,
                   T=31)
-
+    dset = FixLenVideoDataset(data_dir, hp, hp)
     loader = FixLenVideoDataset(data_dir, hp, hp).get_data_loader(32)
 
     for i_batch, sample_batched in enumerate(loader):
         print(i_batch)
+        import ipdb; ipdb.set_trace()
         images = np.asarray(sample_batched['video'])
 
         images = np.transpose((images + 1) / 2, [0, 1, 3, 4, 2])  # convert to channel-first
         actions = np.asarray(sample_batched['actions'])
         #print('actions', actions)
-
-        plt.imshow(np.asarray(images[0, 0]))
-        plt.show()
+        #
+        # plt.imshow(np.asarray(images[0, 0]))
+        # plt.show()
 
