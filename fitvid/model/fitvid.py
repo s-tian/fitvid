@@ -385,7 +385,10 @@ class FitVid(nn.Module):
     def load_parameters(self, path):
         # load everything
         state_dict = torch.load(path)
-        self.load_state_dict(state_dict, strict=False)
+        if 'module.encoder.stages.0.0.Conv_0.weight' in state_dict:
+            new_state_dict = {k[7:]: v for k, v in state_dict.items() if k[:7] == 'module.'}
+            state_dict = new_state_dict
+        self.load_state_dict(state_dict, strict=True)
         print(f'Loaded checkpoint {path}')
         if self.has_depth_predictor:
             self.load_depth_predictor()  # reload pretrained depth model

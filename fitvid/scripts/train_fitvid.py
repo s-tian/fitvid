@@ -425,10 +425,7 @@ def main(argv):
             else:
                 os.mkdir(FLAGS.output_dir)
             save_path = os.path.join(FLAGS.output_dir, f'model_epoch{epoch}')
-            if NGPU > 1:
-                torch.save(model.module.state_dict(), save_path)
-            else:
-                torch.save(model.state_dict(), save_path)
+            torch.save(model.module.state_dict(), save_path)
             print(f'Saved model to {save_path}')
         else:
             print('Skip saving models')
