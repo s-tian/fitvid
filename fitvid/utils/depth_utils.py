@@ -32,7 +32,10 @@ def normalize_depth_npy(t, across_dims=1):
 
 def depth_to_rgb_im(im, cmap=plt.get_cmap('jet_r')):
     # shape = [(T), 1, W, H]
-    im = np.squeeze(im)
+    if len(im.shape) >= 3 and im.shape[-3] == 1:
+        im = np.squeeze(im, axis=-3)
+    if im.shape[-1] == 1:
+        im = np.squeeze(im, axis=-1)
     # convert to rgb using given cmap
     im = cmap(im)[..., :3]
     return (im * 255).astype(np.uint8)

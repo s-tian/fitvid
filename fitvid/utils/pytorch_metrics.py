@@ -62,6 +62,21 @@ class PolicyFeatureL2Metric(nn.Module):
     def get_device(self):
         return self.image_policy.conv_layers[0].weight.device
 
+    def get_feature_activations(self, im):
+        """
+        :param imgs: tensor of shape [..., C, H, W]
+        :return: tensor of shape [..., D] where D is the shape of the feature dimension
+        """
+        assert im.shape[-1] == im.shape[-2]
+        leading_dims = im.shape[:-3]
+        im = flatten_image(im)
+        actions = self.image_policy(im.contiguous())
+        activations = self.activation[f'{self.get_device()}/feats'].clone()
+        activations = activations.reshape(leading_dims + (-1,))
+        assert activations.shape[:-1] == leading_dims
+
+        return activations
+
     def __call__(self, im1, im2):
         """
         :param im1: batch of images to compare

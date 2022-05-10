@@ -64,7 +64,7 @@ class BaseVideoDataset(data.Dataset):
         else:
             self.n_worker = 1
         #todo debug:
-        self.n_worker = 8
+        self.n_worker = 4
 
     def get_data_loader(self, batch_size):
         print('len {} dataset {}'.format(self.phase, len(self)))
@@ -173,7 +173,7 @@ class FixLenVideoDataset(BaseVideoDataset):
         """ This function processes data tensors so as to have length equal to max_seq_len
         by sampling / padding if necessary """
         T = data_dict['images'].shape[0]
-        offset = np.random.randint(0, T - self._data_conf.sel_len + 1, 1)
+        offset = np.random.randint(0, T - self._data_conf.sel_len, 1)
         data_dict = map_dict(lambda tensor: self._croplen(tensor, offset, self._data_conf.sel_len), data_dict)
         #if 'actions' in data_dict:
         #    data_dict.actions = data_dict.actions[:-1]
@@ -198,12 +198,13 @@ class FixLenVideoDataset(BaseVideoDataset):
     @staticmethod
     def _croplen(val, offset, target_length):
         """Pads / crops sequence to desired length."""
-        return val[int(offset): int(offset) + target_length]
+        # return val[int(offset): int(offset) + target_length]
         val = val[int(offset):]
         len = val.shape[0]
         if len > target_length:
             return val[:target_length]
         elif len < target_length:
+            print(offset, target_length)
             raise ValueError("not enough length")
         else:
             return val
@@ -222,7 +223,7 @@ class FixLenVideoDataset(BaseVideoDataset):
 def load_hdf5_data(data_dir, bs, image_size=(64, 64), data_type='train'):
     data_dir = data_dir
     hp = AttrDict(img_sz=image_size,
-                  sel_len=9,
+                  sel_len=13,
                   T=600)
     loader = FixLenVideoDataset(data_dir, hp, hp, phase=data_type).get_data_loader(bs)
     return loader
