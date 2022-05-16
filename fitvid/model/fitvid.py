@@ -54,20 +54,29 @@ class FitVid(nn.Module):
         self.loss_weights['kld'] = self.beta
         self.multistep = kwargs['multistep']
         self.z_dim = model_kwargs['z_dim']
+        self.num_video_channels = model_kwargs.get('video_channels', 3)
 
         first_block_shape = [model_kwargs['first_block_shape'][-1]] + model_kwargs['first_block_shape'][:2]
-        self.encoder = ModularEncoder(stage_sizes=model_kwargs['stage_sizes'], output_size=model_kwargs['g_dim'], num_base_filters=model_kwargs['num_base_filters'])
+        self.encoder = ModularEncoder(stage_sizes=model_kwargs['stage_sizes'], output_size=model_kwargs['g_dim'],
+                                      num_base_filters=model_kwargs['num_base_filters'],
+                                      num_input_channels=self.num_video_channels)
         if self.stochastic:
-            self.prior = MultiGaussianLSTM(input_size=model_kwargs['g_dim'], output_size=model_kwargs['z_dim'], hidden_size=model_kwargs['rnn_size'], num_layers=1)
-            self.posterior = MultiGaussianLSTM(input_size=model_kwargs['g_dim'], output_size=model_kwargs['z_dim'], hidden_size=model_kwargs['rnn_size'], num_layers=1)
+            self.prior = MultiGaussianLSTM(input_size=model_kwargs['g_dim'], output_size=model_kwargs['z_dim'],
+                                           hidden_size=model_kwargs['rnn_size'], num_layers=1)
+            self.posterior = MultiGaussianLSTM(input_size=model_kwargs['g_dim'], output_size=model_kwargs['z_dim'],
+                                               hidden_size=model_kwargs['rnn_size'], num_layers=1)
         else:
             self.prior, self.posterior = None, None
 
-        self.decoder = ModularDecoder(first_block_shape=first_block_shape, input_size=model_kwargs['g_dim'], stage_sizes=model_kwargs['stage_sizes'],
-                                      num_base_filters=model_kwargs['num_base_filters'], skip_type=model_kwargs['skip_type'], expand=model_kwargs['expand_decoder'])
+        self.decoder = ModularDecoder(first_block_shape=first_block_shape, input_size=model_kwargs['g_dim'],
+                                      stage_sizes=model_kwargs['stage_sizes'],
+                                      num_base_filters=model_kwargs['num_base_filters'],
+                                      skip_type=model_kwargs['skip_type'], expand=model_kwargs['expand_decoder'],
+                                      num_output_channels=self.num_video_channels)
 
         input_size = self.get_input_size(model_kwargs['g_dim'], model_kwargs['action_size'], model_kwargs['z_dim'])
-        self.frame_predictor = MultiGaussianLSTM(input_size=input_size, output_size=model_kwargs['g_dim'], hidden_size=model_kwargs['rnn_size'], num_layers=2)
+        self.frame_predictor = MultiGaussianLSTM(input_size=input_size, output_size=model_kwargs['g_dim'],
+                                                 hidden_size=model_kwargs['rnn_size'], num_layers=2)
 
         self.lpips = piq.LPIPS()
 
@@ -152,7 +161,7 @@ class FitVid(nn.Module):
         hidden = hidden.view((batch_size, video_len) + hidden.shape[1:])
         video = video.view((batch_size, video_len,) + video.shape[1:])  # reconstruct first two dims
         skips = {k: skips[k].view((batch_size, video_len,) + tuple(skips[k].shape[1:]))[:, self.n_past - 1] for k in skips.keys()}
-        preds, kld, means, logvars = self.predict_rgb(video, actions, hidden, skips, self.posterior, self.prior, self.frame_predictor)
+        preds, kld, means, logvars = self.predict_rgb(video, actions, hidden, skips)
         loss, preds, metrics = self.compute_loss(preds, video, kld,
                                                  segmentation=segmentation, depth=depth, normal=normal, compute_metrics=compute_metrics)
         metrics.update({
@@ -234,7 +243,7 @@ class FitVid(nn.Module):
 
         return total_loss, preds, metrics
 
-    def predict_rgb(self, video, actions, hidden, skips, posterior, prior, frame_predictor):
+    def predict_rgb(self, video, actions, hidden, skips):
         if self.is_inference:
             assert False
 
@@ -250,10 +259,10 @@ class FitVid(nn.Module):
                 h, h_target = hidden[:, i - 1], hidden[:, i]
                 if i > self.n_past:
                     h, _ = self.encoder(pred)
-                (z_t, mu, logvar), post_state = posterior(h_target, post_state)
-                (_, prior_mu, prior_logvar), prior_state = prior(h, prior_state)
+                (z_t, mu, logvar), post_state = self.posterior(h_target, post_state)
+                (_, prior_mu, prior_logvar), prior_state = self.prior(h, prior_state)
                 inp = self.get_input(h, actions[:, i - 1], z_t)
-                (_, h_pred, _), pred_state = frame_predictor(inp, pred_state)
+                (_, h_pred, _), pred_state = self.frame_predictor(inp, pred_state)
                 h_pred = torch.sigmoid(h_pred)  # TODO notice
                 h_preds.append(h_pred)
                 means.append(mu)
@@ -265,10 +274,10 @@ class FitVid(nn.Module):
         else:
             for i in range(1, video_len):
                 h, h_target = hidden[:, i - 1], hidden[:, i]
-                (z_t, mu, logvar), post_state = posterior(h_target, post_state)
-                (_, prior_mu, prior_logvar), prior_state = prior(h, prior_state)
+                (z_t, mu, logvar), post_state = self.posterior(h_target, post_state)
+                (_, prior_mu, prior_logvar), prior_state = self.prior(h, prior_state)
                 inp = self.get_input(h, actions[:, i - 1], z_t)
-                (_, h_pred, _), pred_state = frame_predictor(inp, pred_state)
+                (_, h_pred, _), pred_state = self.frame_predictor(inp, pred_state)
                 h_pred = torch.sigmoid(h_pred)  # TODO notice
                 h_preds.append(h_pred)
                 means.append(mu)
@@ -285,33 +294,55 @@ class FitVid(nn.Module):
         return preds, kld, means, logvars
 
     def evaluate(self, batch, compute_metrics=False):
+        ag_metrics, ag_preds = self._evaluate(batch, compute_metrics, autoregressive=True)
+        non_ag_metrics, non_ag_preds = self._evaluate(batch, compute_metrics, autoregressive=False)
+        ag_metrics = {f'ag/{k}': v for k, v in ag_metrics.items()}
+        non_ag_metrics = {f'non_ag/{k}': v for k, v in non_ag_metrics.items()}
+        metrics = {**ag_metrics, **non_ag_metrics}
+        return metrics, dict(ag=ag_preds, non_ag=non_ag_preds)
+
+    def _evaluate(self, batch, compute_metrics=False, autoregressive=True):
         """Predict the full video conditioned on the first self.n_past frames. """
         if self.is_inference:
             assert False
         video, actions = batch['video'], batch['actions']
         batch_size, video_len = video.shape[0], video.shape[1]
-        pred_state = prior_state = None
+        pred_state = prior_state = post_state = None
         video = video.view((batch_size * video_len,) + video.shape[2:])  # collapse first two dims
         hidden, skips = self.encoder(video)
         skips = {k: skips[k].view((batch_size, video_len,) + tuple(skips[k].shape[1:]))[:, self.n_past - 1] for k in skips.keys()}
         # evaluating
         preds = []
         hidden = hidden.view((batch_size, video_len) + hidden.shape[1:])
-        for i in range(1, video_len):
-            h, _ = hidden[:, i - 1], hidden[:, i]
-            if i > self.n_past:
-                h, _ = self.encoder(pred)
-            if self.stochastic:
-                (z_t, prior_mu, prior_logvar), prior_state = self.prior(h, prior_state)
-            else:
-                z_t = torch.zeros((h.shape[0], self.z_dim)).to(h)
-            inp = self.get_input(h, actions[:, i - 1], z_t)
-            (_, h_pred, _), pred_state = self.frame_predictor(inp, pred_state)
-            h_pred = torch.sigmoid(h_pred) # TODO notice
-            pred = self.decoder(h_pred[None, :], skips)[0]
-            preds.append(pred)
-
-        preds = torch.stack(preds, axis=1)
+        if autoregressive:
+            for i in range(1, video_len):
+                h, _ = hidden[:, i - 1], hidden[:, i]
+                if i > self.n_past:
+                    h, _ = self.encoder(pred)
+                if self.stochastic:
+                    (z_t, prior_mu, prior_logvar), prior_state = self.prior(h, prior_state)
+                else:
+                    z_t = torch.zeros((h.shape[0], self.z_dim)).to(h)
+                inp = self.get_input(h, actions[:, i - 1], z_t)
+                (_, h_pred, _), pred_state = self.frame_predictor(inp, pred_state)
+                h_pred = torch.sigmoid(h_pred) # TODO notice
+                pred = self.decoder(h_pred[None, :], skips)[0]
+                preds.append(pred)
+            preds = torch.stack(preds, axis=1)
+        else:
+            h_preds = []
+            kld = torch.tensor(0).to(video)
+            for i in range(1, video_len):
+                h, h_target = hidden[:, i - 1], hidden[:, i]
+                (z_t, mu, logvar), post_state = self.posterior(h_target, post_state)
+                (_, prior_mu, prior_logvar), prior_state = self.prior(h, prior_state)
+                inp = self.get_input(h, actions[:, i - 1], z_t)
+                (_, h_pred, _), pred_state = self.frame_predictor(inp, pred_state)
+                h_pred = torch.sigmoid(h_pred)  # TODO notice
+                h_preds.append(h_pred)
+                kld += self.kl_divergence(mu, logvar, prior_mu, prior_logvar, batch_size)
+            h_preds = torch.stack(h_preds, axis=1)
+            preds = self.decoder(h_preds, skips)
 
         video = video.view((batch_size, video_len,) + video.shape[1:])  # reconstuct first two dims
         mse_per_sample = mse_loss(preds, video[:, 1:], reduce_batch=False)

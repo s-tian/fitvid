@@ -117,10 +117,10 @@ class DecoderBlock(nn.Module):
 
 class ModularEncoder(nn.Module):
     """Modular Encoder."""
-    def __init__(self, stage_sizes, output_size, num_base_filters):
+    def __init__(self, stage_sizes, output_size, num_base_filters, num_input_channels=3):
         super(ModularEncoder, self).__init__()
         self.stages = nn.ModuleList()
-        prev_num_filters = 3
+        prev_num_filters = num_input_channels
         num_filters = None
         count = 0
         for i, block_size in enumerate(stage_sizes):
@@ -150,7 +150,7 @@ class ModularEncoder(nn.Module):
 
 
 class ModularDecoder(nn.Module):
-    def __init__(self, first_block_shape, input_size, stage_sizes, num_base_filters, skip_type, expand):
+    def __init__(self, first_block_shape, input_size, stage_sizes, num_base_filters, skip_type, expand, num_output_channels=3):
         super(ModularDecoder, self).__init__()
         self.skip_type = skip_type
         self.stage_sizes = stage_sizes
@@ -174,7 +174,7 @@ class ModularDecoder(nn.Module):
                 prev_num_filters = num_filters
             self.stages.append(blocks)
 
-        self.Conv_0 = nn.Conv2d(in_channels=prev_num_filters, out_channels=3, kernel_size=(3, 3), bias=False, padding=1) # pad = (kernel-1)//2
+        self.Conv_0 = nn.Conv2d(in_channels=prev_num_filters, out_channels=num_output_channels, kernel_size=(3, 3), bias=False, padding=1) # pad = (kernel-1)//2
 
     def forward(self, x, skips, has_time_dim=True):
         if has_time_dim:

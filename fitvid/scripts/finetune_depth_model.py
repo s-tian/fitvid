@@ -93,8 +93,8 @@ def load_model(model_name, path):
 
 
 def get_dataloaders(dataset_files, bs, dims, view):
-    train_load = load_dataset_robomimic_torch(dataset_files, batch_size=bs, video_len=10, video_dims=dims, phase='train', depth=True, normal=False, view=view, cache_mode='lowdim')
-    val_load = load_dataset_robomimic_torch(dataset_files, batch_size=bs, video_len=10, video_dims=dims, phase='valid', depth=True, normal=False, view=view, cache_mode='lowdim')
+    train_load = load_dataset_robomimic_torch(dataset_files, batch_size=bs, video_len=10, video_dims=dims, phase='train', depth=True, normal=False, view=view, cache_mode='low_dim')
+    val_load = load_dataset_robomimic_torch(dataset_files, batch_size=bs, video_len=10, video_dims=dims, phase='valid', depth=True, normal=False, view=view, cache_mode='low_dim')
     return train_load, val_load
 
 
