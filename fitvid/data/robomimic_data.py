@@ -102,6 +102,10 @@ def load_dataset_robomimic_torch(dataset_path, batch_size, video_len, video_dims
             }
         if f'{view}_seg' in xs['obs']:
             data_dict['segmentation'] = xs['obs'][f'{view}_seg']
+            # from perceptual_metrics.mpc.utils import save_np_img
+            # import ipdb; ipdb.set_trace()
+            # for i in range(10):
+            #     save_np_img(np.tile((data_dict['segmentation'][0, i, 0] * 20).cpu().numpy()[..., None], (1, 1, 3)).astype(np.uint8), f'seg_{i}')
             # zero out the parts of the segmentation which are not assigned label corresponding to object of interest
             # set the object label components to 1
             object_seg_index = 0  # Seg index is 0 on the iGibson data, and 1 on Mujoco data

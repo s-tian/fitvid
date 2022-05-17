@@ -50,12 +50,15 @@ def sobel_loss(t1, t2, reduce_batch=True):
     return mse_loss(t1_sobel, t2_sobel, reduce_batch=reduce_batch)
 
 
-def mse_loss(t1, t2, reduce_batch=True):
+def mse_loss(t1, t2, reduce_batch=True, mask=None):
+    mse = ((t1 - t2) ** 2)
+    if mask is not None:
+        mse = mask * mse
     if reduce_batch:
-        return ((t1 - t2) ** 2).mean()
+        return mse.mean()
     else:
         reduce_dims = tuple(range(len(t1.shape)))
-        return ((t1 - t2) ** 2).mean(dim=reduce_dims[1:])
+        return mse.mean(dim=reduce_dims[1:])
 
 
 def test_mse_loss():

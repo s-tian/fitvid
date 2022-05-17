@@ -55,6 +55,7 @@ class FitVid(nn.Module):
         self.multistep = kwargs['multistep']
         self.z_dim = model_kwargs['z_dim']
         self.num_video_channels = model_kwargs.get('video_channels', 3)
+        self.no_background_loss = kwargs['no_background_loss']
 
         first_block_shape = [model_kwargs['first_block_shape'][-1]] + model_kwargs['first_block_shape'][:2]
         self.encoder = ModularEncoder(stage_sizes=model_kwargs['stage_sizes'], output_size=model_kwargs['g_dim'],
@@ -179,7 +180,11 @@ class FitVid(nn.Module):
                 total_loss += weight * kld
                 metrics['loss/kld'] = kld
             elif loss == 'rgb':
-                mse_per_sample = mse_loss(preds['rgb'], video[:, 1:], reduce_batch=False)
+                if self.no_background_loss:
+                    mask = torch.bitwise_not(video[:, 1:] > 0.95)
+                else:
+                    mask = None
+                mse_per_sample = mse_loss(preds['rgb'], video[:, 1:], reduce_batch=False, mask=mask)
                 total_loss += mse_per_sample.mean()
                 metrics['loss/mse'] = mse_per_sample.mean()
                 metrics['loss/mse_per_sample'] = mse_per_sample.detach()

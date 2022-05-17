@@ -66,6 +66,7 @@ flags.DEFINE_boolean('has_segmentation', True, 'Does dataset have segmentation m
 
 # depth objective
 flags.DEFINE_boolean('only_depth', False, 'Depth to depth prediction model.')
+flags.DEFINE_boolean('no_background_loss', False, 'Set true to try to ignore background in depth only loss calculation')
 flags.DEFINE_float('depth_weight', 0, 'Weight on depth objective.')
 flags.DEFINE_string('depth_model_path', None, 'Path to load pretrained depth model from.')
 flags.DEFINE_integer('depth_model_size', 256, 'Depth model size.')
@@ -185,6 +186,7 @@ def main(argv):
                    normal_predictor=normal_predictor_kwargs,
                    policy_networks=policy_network_kwargs,
                    loss_weights=loss_weights,
+                   no_background_loss=FLAGS.no_background_loss,
                    )
 
     NGPU = torch.cuda.device_count()
