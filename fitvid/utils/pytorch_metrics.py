@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import piq
 from perceptual_metrics.scripts.distill_policy import create_image_policy
+from fitvid.utils.fvd.fvd import get_fvd_logits, frechet_distance
 
 
 def flatten_image(x):
@@ -24,6 +25,15 @@ def psnr(vid1, vid2):
 def tv(vid1):
     vid1 = flatten_image(vid1)
     return torch.mean(piq.total_variation(vid1))
+
+
+def fvd(vid1, vid2):
+    with torch.cuda.amp.autocast(enabled=False):
+        vid1 = (vid1 * 255).to(torch.uint8)
+        vid2 = (vid2 * 255).to(torch.uint8)
+        emb1, emb2 = get_fvd_logits(vid1), get_fvd_logits(vid2)
+        result = frechet_distance(emb1, emb2)
+    return result
 
 
 def lpips(lpips, vid1, vid2):

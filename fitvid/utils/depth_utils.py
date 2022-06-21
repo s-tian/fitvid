@@ -3,7 +3,6 @@ import matplotlib.pyplot as plt
 import torch.nn.functional as F
 import torch
 
-from kornia.filters import sobel
 
 DEFAULT_WEIGHT_LOCATIONS = {
     'dpt': '/viscam/u/stian/perceptual-metrics/MiDaS/weights/dpt_hybrid-midas-501f0c75.pt',
@@ -42,6 +41,7 @@ def depth_to_rgb_im(im, cmap=plt.get_cmap('jet_r')):
 
 
 def sobel_loss(t1, t2, reduce_batch=True):
+    from kornia.filters import sobel
     original_shape = t1.shape
     compress_shape = (-1,) + tuple(t1.shape[-3:])  # change to (B, C, H, W)
     t1, t2 = torch.reshape(t1, compress_shape), torch.reshape(t2, compress_shape)

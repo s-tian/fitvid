@@ -24,6 +24,7 @@ from fitvid.utils.vis_utils import save_moviepy_gif, build_visualization
 FLAGS = flags.FLAGS
 
 # Model training
+flags.DEFINE_integer('seed', 0, 'Random seed.')  # changed
 flags.DEFINE_boolean('debug', False, 'Debug mode.')  # changed
 flags.DEFINE_integer('batch_size', 32, 'Batch size.')  # changed
 flags.DEFINE_integer('n_past', 2, 'Number of past frames.')
@@ -114,10 +115,10 @@ def get_most_recent_checkpoint(dir):
 
 def main(argv):
     import random
-    random.seed(0)
-    torch.manual_seed(0)
-    np.random.seed(0)
-    os.environ['PYTHONHASHSEED'] = str(0)
+    random.seed(FLAGS.seed)
+    torch.manual_seed(FLAGS.seed)
+    np.random.seed(FLAGS.seed)
+    os.environ['PYTHONHASHSEED'] = str(FLAGS.seed)
 
     torch.backends.cudnn.benchmark = True
     torch.backends.cudnn.enabled = True
@@ -146,8 +147,9 @@ def main(argv):
     else:
         policy_network_kwargs = None
 
-    other_weights = FLAGS.depth_weight + FLAGS.normal_weight
+    other_weights = FLAGS.depth_weight + FLAGS.normal_weight + FLAGS.lpips_weight
     depth_weight = FLAGS.depth_weight / (other_weights + 1)
+    lpips_weight = FLAGS.lpips_weight / (other_weights + 1)
     normal_weight = FLAGS.normal_weight / (other_weights + 1)
     other_weights = other_weights / (other_weights + 1)
 
@@ -159,6 +161,7 @@ def main(argv):
         'depth': depth_weight,
         'normal': normal_weight,
         'policy': policy_weight,
+        'lpips': lpips_weight,
     }
 
     model_kwargs = dict(
@@ -209,8 +212,10 @@ def main(argv):
 
     if FLAGS.hdf5_data:
         image_size = [int(i) for i in FLAGS.image_size]
-        data_loader = load_hdf5_data(FLAGS.dataset_file, FLAGS.batch_size, image_size=image_size, data_type='train')
-        test_data_loader = load_hdf5_data(FLAGS.dataset_file, FLAGS.batch_size, image_size=image_size, data_type='val')
+        data_loader = load_hdf5_data(FLAGS.dataset_file, FLAGS.batch_size, sel_len=FLAGS.n_past + FLAGS.n_future,
+                                     image_size=image_size, data_type='train')
+        test_data_loader = load_hdf5_data(FLAGS.dataset_file, FLAGS.batch_size, sel_len=FLAGS.n_past + FLAGS.n_future,
+                                          image_size=image_size, data_type='val')
         prep_data = prep_data_test = lambda x: x
     else:
         if FLAGS.debug:

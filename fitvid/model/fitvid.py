@@ -6,9 +6,10 @@ import torch.nn.functional as F
 from fitvid.model.nvae import ModularEncoder, ModularDecoder
 from fitvid.model.depth_predictor import DepthPredictor
 from fitvid.utils.depth_utils import mse_loss
-from fitvid.utils.pytorch_metrics import psnr, lpips, ssim, tv, PolicyFeatureL2Metric
+from fitvid.utils.pytorch_metrics import psnr, lpips, ssim, tv, fvd, PolicyFeatureL2Metric
 
 import piq
+
 
 class MultiGaussianLSTM(nn.Module):
     """Multi layer lstm with Gaussian output."""
@@ -55,7 +56,7 @@ class FitVid(nn.Module):
         self.multistep = kwargs['multistep']
         self.z_dim = model_kwargs['z_dim']
         self.num_video_channels = model_kwargs.get('video_channels', 3)
-        self.no_background_loss = kwargs['no_background_loss']
+        self.no_background_loss = kwargs.get('no_background_loss', False)
 
         first_block_shape = [model_kwargs['first_block_shape'][-1]] + model_kwargs['first_block_shape'][:2]
         self.encoder = ModularEncoder(stage_sizes=model_kwargs['stage_sizes'], output_size=model_kwargs['g_dim'],
@@ -145,6 +146,7 @@ class FitVid(nn.Module):
                 'metrics/lpips': lpips(self.lpips, vid1, vid2),
                 'metrics/tv': tv(vid1),
                 'metrics/ssim': ssim(vid1, vid2),
+                'metrics/fvd': fvd(vid1, vid2),
             }
             if self.policy_feature_metric:
                 for i, policy_feature_metric in enumerate(self.policy_network_losses):
@@ -193,6 +195,11 @@ class FitVid(nn.Module):
                     tv_loss = tv(preds)
                     total_loss += weight * tv_loss
                 metrics['loss/tv'] = tv_loss
+            elif loss == 'lpips':
+                if weight != 0:
+                    lpips_loss = lpips(self.lpips, preds['rgb'], video[:, 1:])
+                    total_loss += weight * lpips_loss
+                metrics['loss/lpips'] = lpips_loss
             elif loss == 'policy':
                 if weight != 0 and self.policy_feature_metric:
                     feature_losses = []
