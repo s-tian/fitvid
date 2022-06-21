@@ -32,7 +32,7 @@ class AttrDict(dict):
 
 def map_dict(fn, d):
     """takes a dictionary and applies the function to every element"""
-    return type(d)(map(lambda kv: (kv[0], fn(kv[1])), d.items()))
+    return type(d)(map(lambda kv: (kv[0], fn(kv[0], kv[1])), d.items()))
 
 
 def resize_video(video, size):
@@ -129,8 +129,6 @@ class FixLenVideoDataset(BaseVideoDataset):
                 self.cached_data[path] = data_dict
                 self.traj_lengths.append(data_dict['images'].shape[0])
 
-        print(phase)
-        print(len(self.filenames))
 
     def _get_filenames(self):
         if not isinstance(self.data_dir, list):
@@ -172,11 +170,12 @@ class FixLenVideoDataset(BaseVideoDataset):
     def sample_rand_shifts(self, data_dict):
         """ This function processes data tensors so as to have length equal to max_seq_len
         by sampling / padding if necessary """
+        # [print(k, v.shape[0]) for k, v in data_dict.items()]
         T = data_dict['images'].shape[0]
-        offset = np.random.randint(0, T - self._data_conf.sel_len, 1)
-        data_dict = map_dict(lambda tensor: self._croplen(tensor, offset, self._data_conf.sel_len), data_dict)
-        #if 'actions' in data_dict:
-        #    data_dict.actions = data_dict.actions[:-1]
+        offset = np.random.randint(0, T - self._data_conf.sel_len + 1, 1)
+        data_dict = map_dict(lambda name, tensor: self._croplen(name, tensor, offset, self._data_conf.sel_len), data_dict)
+        if 'actions' in data_dict:
+           data_dict.actions = data_dict.actions[:self._data_conf.sel_len-1]
         return data_dict
 
     def preprocess_images(self, images):
@@ -196,15 +195,14 @@ class FixLenVideoDataset(BaseVideoDataset):
         return len(self.filenames) * self.traj_per_file
 
     @staticmethod
-    def _croplen(val, offset, target_length):
+    def _croplen(name, val, offset, target_length):
         """Pads / crops sequence to desired length."""
         # return val[int(offset): int(offset) + target_length]
         val = val[int(offset):]
         len = val.shape[0]
         if len > target_length:
             return val[:target_length]
-        elif len < target_length:
-            print(offset, target_length)
+        elif len < target_length and name not in ['states', 'actions']:
             raise ValueError("not enough length")
         else:
             return val
@@ -220,10 +218,10 @@ class FixLenVideoDataset(BaseVideoDataset):
                                   drop_last=True, sampler=sampler)
 
 
-def load_hdf5_data(data_dir, bs, image_size=(64, 64), data_type='train'):
+def load_hdf5_data(data_dir, bs, sel_len, image_size=(64, 64), data_type='train'):
     data_dir = data_dir
     hp = AttrDict(img_sz=image_size,
-                  sel_len=13,
+                  sel_len=sel_len,
                   T=600)
     loader = FixLenVideoDataset(data_dir, hp, hp, phase=data_type).get_data_loader(bs)
     return loader
