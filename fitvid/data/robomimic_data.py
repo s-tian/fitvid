@@ -15,7 +15,7 @@ def get_image_name(cam):
 
 
 def get_data_loader(dataset_paths, batch_size, video_len, video_dims, phase, depth, normal, view, cache_mode='lowdim',
-                    seg=True, only_depth=False):
+                    seg=True, only_depth=False, only_state=False):
     """
     Get a data loader to sample batches of data.
     """
@@ -28,14 +28,16 @@ def get_data_loader(dataset_paths, batch_size, video_len, video_dims, phase, dep
             # "scan": [f"{view}_segmentation_instance"]
             "scan": [f"{view}_seg"],
             # "normal": [f"{view}_normal"]
+            "low_dim": ["object", "robot0_eef_pos", "robot0_eef_quat"],
         }
     })
 
     all_datasets = []
     for i, dataset_path in enumerate(dataset_paths):
         # obs_keys = (f"{view}_image", f"{view}_segmentation_instance")
+        # obs_keys = ("object", "robot0_eef_pos", "robot0_eef_quat")
         obs_keys = tuple()
-        if not only_depth:
+        if not only_depth and not only_state:
             obs_keys = obs_keys + (imageview_name,)
         if depth or only_depth:
             obs_keys = obs_keys + (f"{view}_depth",)
@@ -82,14 +84,21 @@ def get_data_loader(dataset_paths, batch_size, video_len, video_dims, phase, dep
 
 
 def load_dataset_robomimic_torch(dataset_path, batch_size, video_len, video_dims, phase, depth, normal, view='agentview',
-                                 cache_mode='low_dim', seg=True, only_depth=False):
+                                 cache_mode='low_dim', seg=True, only_depth=False, only_state=False):
     assert phase in ['train', 'valid'], f'Phase is not one of the acceptable values! Got {phase}'
 
     loader = get_data_loader(dataset_path, batch_size, video_len, video_dims, phase, depth, normal, view, cache_mode, seg,
-                             only_depth)
+                             only_depth, only_state)
 
     def prepare_data(xs):
-        if only_depth:
+        if only_state:
+            data_dict = {
+                'video': torch.cat([xs['obs']['robot0_eef_pos'],
+                                    xs['obs']['robot0_eef_quat'],
+                                    xs['obs']['object']], dim=-1),
+                'actions': xs['actions'],
+            }
+        elif only_depth:
             # take depth video as the actual video
             data_dict = {
                 'video': xs['obs'][f'{view}_depth'],
