@@ -114,16 +114,18 @@ def load_dataset_robomimic_torch(dataset_path, batch_size, video_len, video_dims
             # from perceptual_metrics.mpc.utils import save_np_img
             # import ipdb; ipdb.set_trace()
             # for i in range(10):
-            #     save_np_img(np.tile((data_dict['segmentation'][0, i, 0] * 20).cpu().numpy()[..., None], (1, 1, 3)).astype(np.uint8), f'seg_{i}')
+            #     save_np_img(np.tile(((data_dict['segmentation'][0, i, 0] == i) * 60).cpu().numpy()[..., None], (1, 1, 3)).astype(np.uint8), f'seg_{i}')
             # zero out the parts of the segmentation which are not assigned label corresponding to object of interest
             # set the object label components to 1
-            object_seg_index = 0  # Seg index is 0 on the iGibson data, and 1 on Mujoco data
-            arm_seg_index = 1  # Seg index is 0 on the iGibson data, and 1 on Mujoco data
+            object_seg_indxs = [0, 1, 2, 3]  # Seg index is 0 on the iGibson data, and 1 on Mujoco data
+            arm_seg_indxs = [4, 5, 6]  # Seg index is 0 on the iGibson data, and 1 on Mujoco data
             seg_image = torch.zeros_like(data_dict['segmentation'])
-            seg_image[data_dict['segmentation'] == object_seg_index] = 1
-            seg_image[data_dict['segmentation'] == arm_seg_index] = 2
+            for object_seg_index in object_seg_indxs:
+                seg_image[data_dict['segmentation'] == object_seg_index] = 1
+            for arm_seg_index in arm_seg_indxs:
+                seg_image[data_dict['segmentation'] == arm_seg_index] = 2
             not_either_mask = ~(
-                        (data_dict['segmentation'] == object_seg_index) | (data_dict['segmentation'] == arm_seg_index))
+                        (seg_image == 1) | (seg_image == 2))
             seg_image[not_either_mask] = 0
             data_dict['segmentation'] = seg_image
         else:

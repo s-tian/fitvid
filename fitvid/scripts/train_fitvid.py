@@ -38,6 +38,7 @@ flags.DEFINE_float('weight_decay', 0.0, 'weight decay value')
 flags.DEFINE_boolean('stochastic', True, 'Use a stochastic model.')
 flags.DEFINE_boolean('multistep', False, 'Multi-step training.')  # changed
 flags.DEFINE_boolean('fp16', False, 'Use lower precision training for perf improvement.')  # changed
+flags.DEFINE_float('rgb_weight', 1, 'Weight on rgb objective (default 1).')
 
 # Model architecture
 flags.DEFINE_integer('z_dim', 10, 'LSTM output size.')  #
@@ -67,7 +68,6 @@ flags.DEFINE_boolean('has_segmentation', True, 'Does dataset have segmentation m
 
 # depth objective
 flags.DEFINE_boolean('only_depth', False, 'Depth to depth prediction model.')
-flags.DEFINE_boolean('no_background_loss', False, 'Set true to try to ignore background in depth only loss calculation')
 flags.DEFINE_float('depth_weight', 0, 'Weight on depth objective.')
 flags.DEFINE_string('depth_model_path', None, 'Path to load pretrained depth model from.')
 flags.DEFINE_integer('depth_model_size', 256, 'Depth model size.')
@@ -76,6 +76,11 @@ flags.DEFINE_integer('depth_start_epoch', 2, 'When to start training with depth 
 # normal model
 flags.DEFINE_float('normal_weight', 0, 'Weight on normal objective.')
 flags.DEFINE_string('normal_model_path', None, 'Path to load pretrained depth model from.')
+
+# define weights for other types of losses
+flags.DEFINE_float('lpips_weight', 0, 'Weight on lpips objective.')
+flags.DEFINE_float('tv_weight', 0, 'Weight on tv objective.')
+flags.DEFINE_float('segmented_object_weight', 0, 'Extra weighting on pixels with segmented objects.')
 
 # Policy networks
 flags.DEFINE_float('policy_weight', 0, 'Weight on policy loss.')
@@ -147,21 +152,25 @@ def main(argv):
     else:
         policy_network_kwargs = None
 
-    other_weights = FLAGS.depth_weight + FLAGS.normal_weight + FLAGS.lpips_weight
-    depth_weight = FLAGS.depth_weight / (other_weights + 1)
-    lpips_weight = FLAGS.lpips_weight / (other_weights + 1)
-    normal_weight = FLAGS.normal_weight / (other_weights + 1)
-    other_weights = other_weights / (other_weights + 1)
-
-    policy_weight = FLAGS.policy_weight
+    total_weights = FLAGS.rgb_weight + FLAGS.depth_weight + FLAGS.normal_weight
+    if total_weights > 0:
+        rgb_weight = FLAGS.rgb_weight / total_weights
+        depth_weight = FLAGS.depth_weight / total_weights
+        normal_weight = FLAGS.normal_weight / total_weights
+    else:
+        rgb_weight = 0
+        depth_weight = 0
+        normal_weight = 0
 
     loss_weights = {
         'kld': FLAGS.beta,
-        'rgb': 1 - other_weights,
+        'rgb': rgb_weight,
         'depth': depth_weight,
         'normal': normal_weight,
-        'policy': policy_weight,
-        'lpips': lpips_weight,
+        'policy': FLAGS.policy_weight,
+        'lpips': FLAGS.lpips_weight,
+        'tv': FLAGS.tv_weight,
+        'segmented_object': FLAGS.segmented_object_weight,
     }
 
     model_kwargs = dict(
@@ -339,7 +348,7 @@ def main(argv):
             model.module.loss_weights['normal'] = normal_weight
 
         for iter_item in enumerate(tqdm(data_loader)):
-            wandb_log = {}
+            wandb_log = dict()
 
             batch_idx, batch = iter_item
             batch = dict_to_cuda(prep_data(batch))

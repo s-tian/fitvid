@@ -60,6 +60,13 @@ def mse_loss(t1, t2, reduce_batch=True, mask=None):
         reduce_dims = tuple(range(len(t1.shape)))
         return mse.mean(dim=reduce_dims[1:])
 
+def mse_loss_segmented(t1, t2, segmentation, reduce_batch=True):
+    mask = torch.ones_like(t2).type(torch.uint8)
+    segmentation = torch.tile(segmentation, (1, 1, 3, 1, 1))
+    mask[segmentation != 1] = 0
+    mask[segmentation == 1] = 1
+    mse = mse_loss(t1, t2, reduce_batch=reduce_batch, mask=mask)
+    return mse
 
 def test_mse_loss():
     t1, t2 = torch.randn((30, 20, 10)), torch.randn((30, 20, 10))

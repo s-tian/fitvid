@@ -5,7 +5,7 @@ import torch.nn.functional as F
 
 from fitvid.model.nvae import ModularEncoder, ModularDecoder
 from fitvid.model.depth_predictor import DepthPredictor
-from fitvid.utils.depth_utils import mse_loss
+from fitvid.utils.depth_utils import mse_loss, mse_loss_segmented
 from fitvid.utils.pytorch_metrics import psnr, lpips, ssim, tv, fvd, PolicyFeatureL2Metric
 
 import piq
@@ -139,7 +139,7 @@ class FitVid(nn.Module):
                      + torch.square(mean1 - mean2) * torch.exp(-logvar2))
         return torch.sum(kld) / batch_size
 
-    def compute_metrics(self, vid1, vid2):
+    def compute_metrics(self, vid1, vid2, segmentation=None):
         with torch.no_grad():
             metrics = {
                 'metrics/psnr': psnr(vid1, vid2),
@@ -148,6 +148,12 @@ class FitVid(nn.Module):
                 'metrics/ssim': ssim(vid1, vid2),
                 'metrics/fvd': fvd(vid1, vid2),
             }
+
+            if segmentation is not None:
+                per_sample_segmented_mse = mse_loss_segmented(vid1, vid2, segmentation, reduce_batch=False)
+                metrics['metrics/segmented_mse'] = per_sample_segmented_mse.mean()
+                metrics['metrics/segmented_mse_per_sample'] = per_sample_segmented_mse.detach()
+
             if self.policy_feature_metric:
                 for i, policy_feature_metric in enumerate(self.policy_network_losses):
                     action_mse, feature_mse = policy_feature_metric(vid1, vid2)
@@ -182,24 +188,28 @@ class FitVid(nn.Module):
                 total_loss += weight * kld
                 metrics['loss/kld'] = kld
             elif loss == 'rgb':
-                if self.no_background_loss:
-                    mask = torch.bitwise_not(video[:, 1:] > 0.95)
-                else:
-                    mask = None
-                mse_per_sample = mse_loss(preds['rgb'], video[:, 1:], reduce_batch=False, mask=mask)
-                total_loss += mse_per_sample.mean()
+                # initialize mask to be a torch tensor of all ones with same shape as video
+                mse_per_sample = mse_loss(preds['rgb'], video[:, 1:], reduce_batch=False, mask=None)
+                total_loss += mse_per_sample.mean() * weight
                 metrics['loss/mse'] = mse_per_sample.mean()
                 metrics['loss/mse_per_sample'] = mse_per_sample.detach()
+            elif loss == 'segmented_object':
+                if weight > 0:
+                    segmented_mse_per_sample = mse_loss_segmented(preds['rgb'], video[:, 1:], segmentation[:, 1:],
+                                                                    reduce_batch=False)
+                    total_loss += segmented_mse_per_sample.mean() * weight
+                    metrics['loss/segmented_mse'] = segmented_mse_per_sample.mean()
+                    metrics['loss/segmented_mse_per_sample'] = segmented_mse_per_sample.detach()
             elif loss == 'tv':
                 if weight != 0:
                     tv_loss = tv(preds)
                     total_loss += weight * tv_loss
-                metrics['loss/tv'] = tv_loss
+                    metrics['loss/tv'] = tv_loss
             elif loss == 'lpips':
                 if weight != 0:
                     lpips_loss = lpips(self.lpips, preds['rgb'], video[:, 1:])
                     total_loss += weight * lpips_loss
-                metrics['loss/lpips'] = lpips_loss
+                    metrics['loss/lpips'] = lpips_loss
             elif loss == 'policy':
                 if weight != 0 and self.policy_feature_metric:
                     feature_losses = []
@@ -250,7 +260,7 @@ class FitVid(nn.Module):
         })
         if compute_metrics:
             metrics.update(
-                self.compute_metrics(preds['rgb'], video[:, 1:])
+                self.compute_metrics(preds['rgb'], video[:, 1:], segmentation[:, 1:])
             )
 
         return total_loss, preds, metrics
@@ -317,7 +327,7 @@ class FitVid(nn.Module):
         """Predict the full video conditioned on the first self.n_past frames. """
         if self.is_inference:
             assert False
-        video, actions = batch['video'], batch['actions']
+        video, actions, segmentation = batch['video'], batch['actions'], batch.get('segmentation', None)
         batch_size, video_len = video.shape[0], video.shape[1]
         pred_state = prior_state = post_state = None
         video = video.view((batch_size * video_len,) + video.shape[2:])  # collapse first two dims
@@ -365,7 +375,7 @@ class FitVid(nn.Module):
         }
 
         if compute_metrics:
-            metrics.update(self.compute_metrics(preds, video[:, 1:]))
+            metrics.update(self.compute_metrics(preds, video[:, 1:], segmentation[:, 1:]))
 
         preds = dict(rgb=preds)
 
