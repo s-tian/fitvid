@@ -32,7 +32,7 @@ flags.DEFINE_integer('n_future', 10, 'Number of future frames.')  # not used, in
 flags.DEFINE_integer('num_epochs', 1000, 'Number of steps to train for.')
 flags.DEFINE_float('beta', 1e-4, 'Weight on KL.')
 flags.DEFINE_string('data_in_gpu', 'True', 'whether to put data in GPU, or RAM')
-flags.DEFINE_string('loss', 'l2', 'whether to use l2 or l1 loss')
+flags.DEFINE_string('rgb_loss_type', 'l2', 'whether to use l2 or l1 loss')
 flags.DEFINE_float('lr', 1e-3, 'learning rate')
 flags.DEFINE_float('weight_decay', 0.0, 'weight decay value')
 flags.DEFINE_boolean('stochastic', True, 'Use a stochastic model.')
@@ -81,6 +81,7 @@ flags.DEFINE_string('normal_model_path', None, 'Path to load pretrained depth mo
 flags.DEFINE_float('lpips_weight', 0, 'Weight on lpips objective.')
 flags.DEFINE_float('tv_weight', 0, 'Weight on tv objective.')
 flags.DEFINE_float('segmented_object_weight', 0, 'Extra weighting on pixels with segmented objects.')
+flags.DEFINE_boolean('corr_wise', False, 'Correlation-wise loss.')
 
 # Policy networks
 flags.DEFINE_float('policy_weight', 0, 'Weight on policy loss.')
@@ -191,14 +192,14 @@ def main(argv):
 
     model = FitVid(model_kwargs=model_kwargs,
                    beta=FLAGS.beta,
-                   loss_fn=FLAGS.loss,
                    multistep=FLAGS.multistep,
                    is_inference=False,
                    depth_predictor=depth_predictor_kwargs,
                    normal_predictor=normal_predictor_kwargs,
                    policy_networks=policy_network_kwargs,
                    loss_weights=loss_weights,
-                   no_background_loss=FLAGS.no_background_loss,
+                   rgb_loss_type=FLAGS.rgb_loss_type,
+                   corr_wise=FLAGS.corr_wise,
                    )
 
     NGPU = torch.cuda.device_count()
@@ -208,6 +209,8 @@ def main(argv):
     print(f'Attempting to load from checkpoint {checkpoint if checkpoint else "None, no model found"}')
     if checkpoint:
         model.load_parameters(checkpoint)
+
+    model.setup_train_losses()
 
     # dump model config
     with open(os.path.join(FLAGS.output_dir, 'config.json'), 'w') as config_file:

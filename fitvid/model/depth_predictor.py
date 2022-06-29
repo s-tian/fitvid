@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from fitvid.utils.depth_utils import mse_loss
+from fitvid.utils.depth_utils import pixel_wise_loss
 
 
 class DepthPredictor(nn.Module):
@@ -13,7 +13,7 @@ class DepthPredictor(nn.Module):
         self.input_size = input_size
         self.freeze_model = freeze_model
         self.depth_head = self.load_pretrained_depth_model()
-        self.depth_loss = mse_loss
+        self.depth_loss = pixel_wise_loss
 
     def load_pretrained_depth_model(self):
         # assert FLAGS.pretrained_depth_objective, 'Only pretrained depth objective available right now'

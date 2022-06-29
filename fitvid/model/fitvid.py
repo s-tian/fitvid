@@ -5,7 +5,7 @@ import torch.nn.functional as F
 
 from fitvid.model.nvae import ModularEncoder, ModularDecoder
 from fitvid.model.depth_predictor import DepthPredictor
-from fitvid.utils.depth_utils import mse_loss, mse_loss_segmented
+from fitvid.utils.depth_utils import pixel_wise_loss, pixel_wise_loss_segmented
 from fitvid.utils.pytorch_metrics import psnr, lpips, ssim, tv, fvd, PolicyFeatureL2Metric
 
 import piq
@@ -56,7 +56,6 @@ class FitVid(nn.Module):
         self.multistep = kwargs['multistep']
         self.z_dim = model_kwargs['z_dim']
         self.num_video_channels = model_kwargs.get('video_channels', 3)
-        self.no_background_loss = kwargs.get('no_background_loss', False)
 
         first_block_shape = [model_kwargs['first_block_shape'][-1]] + model_kwargs['first_block_shape'][:2]
         self.encoder = ModularEncoder(stage_sizes=model_kwargs['stage_sizes'], output_size=model_kwargs['g_dim'],
@@ -81,6 +80,8 @@ class FitVid(nn.Module):
                                                  hidden_size=model_kwargs['rnn_size'], num_layers=2)
 
         self.lpips = piq.LPIPS()
+
+        self.rgb_loss_type = kwargs.get('rgb_loss_type', 'l2')
 
         if kwargs.get('depth_predictor', None):
             self.has_depth_predictor = True
@@ -118,6 +119,20 @@ class FitVid(nn.Module):
     def load_depth_predictor(self):
         self.depth_predictor = DepthPredictor(**self.depth_predictor_cfg)
 
+    def setup_train_losses(self):
+        if self.rgb_loss_type == 'l2':
+            self.rgb_loss = nn.MSELoss()
+        elif self.rgb_loss_type == 'l1':
+            self.rgb_loss = nn.L1Loss()
+
+        if self.config.get('corr_wise', None):
+            from fitvid.utils.corrwise_loss import CorrWiseLoss
+            self.rgb_loss = CorrWiseLoss(self.rgb_loss,
+                                     backward_warp=True,
+                                     return_warped=False,
+                                     padding_mode='reflection',
+                                     scale_clip=0.1)
+
     def get_input(self, hidden, action, z):
         inp = [hidden]
         if self.action_conditioned:
@@ -150,7 +165,7 @@ class FitVid(nn.Module):
             }
 
             if segmentation is not None:
-                per_sample_segmented_mse = mse_loss_segmented(vid1, vid2, segmentation, reduce_batch=False)
+                per_sample_segmented_mse = pixel_wise_loss_segmented(vid1, vid2, segmentation, loss=self.rgb_loss_type, reduce_batch=False)
                 metrics['metrics/segmented_mse'] = per_sample_segmented_mse.mean()
                 metrics['metrics/segmented_mse_per_sample'] = per_sample_segmented_mse.detach()
 
@@ -189,14 +204,18 @@ class FitVid(nn.Module):
                 metrics['loss/kld'] = kld
             elif loss == 'rgb':
                 # initialize mask to be a torch tensor of all ones with same shape as video
-                mse_per_sample = mse_loss(preds['rgb'], video[:, 1:], reduce_batch=False, mask=None)
-                total_loss += mse_per_sample.mean() * weight
+                with torch.no_grad():
+                    mse_per_sample = pixel_wise_loss(preds['rgb'], video[:, 1:], loss='l2', reduce_batch=False, mask=None)
+                    l1_per_sample = pixel_wise_loss(preds['rgb'], video[:, 1:], loss='l1', reduce_batch=False, mask=None)
+                total_loss += self.rgb_loss(preds['rgb'], video[:, 1:]) * weight
                 metrics['loss/mse'] = mse_per_sample.mean()
                 metrics['loss/mse_per_sample'] = mse_per_sample.detach()
+                metrics['loss/l1_loss'] = l1_per_sample.mean()
+                metrics['loss/l1_loss_per_sample'] = l1_per_sample.detach()
             elif loss == 'segmented_object':
                 if weight > 0:
-                    segmented_mse_per_sample = mse_loss_segmented(preds['rgb'], video[:, 1:], segmentation[:, 1:],
-                                                                    reduce_batch=False)
+                    segmented_mse_per_sample = pixel_wise_loss_segmented(preds['rgb'], video[:, 1:], segmentation[:, 1:],
+                                                                         loss=self.rgb_loss_type, reduce_batch=False)
                     total_loss += segmented_mse_per_sample.mean() * weight
                     metrics['loss/segmented_mse'] = segmented_mse_per_sample.mean()
                     metrics['loss/segmented_mse_per_sample'] = segmented_mse_per_sample.detach()
@@ -259,9 +278,14 @@ class FitVid(nn.Module):
             'loss/all': total_loss,
         })
         if compute_metrics:
-            metrics.update(
-                self.compute_metrics(preds['rgb'], video[:, 1:], segmentation[:, 1:])
-            )
+            if segmentation is not None:
+                metrics.update(
+                    self.compute_metrics(preds['rgb'], video[:, 1:], segmentation[:, 1:])
+                )
+            else:
+                metrics.update(
+                    self.compute_metrics(preds['rgb'], video[:, 1:])
+                )
 
         return total_loss, preds, metrics
 
@@ -367,15 +391,22 @@ class FitVid(nn.Module):
             preds = self.decoder(h_preds, skips)
 
         video = video.view((batch_size, video_len,) + video.shape[1:])  # reconstuct first two dims
-        mse_per_sample = mse_loss(preds, video[:, 1:], reduce_batch=False)
+        mse_per_sample = pixel_wise_loss(preds, video[:, 1:], loss='l2', reduce_batch=False)
         mse = mse_per_sample.mean()
+        l1_loss_per_sample = pixel_wise_loss(preds, video[:, 1:], loss='l1', reduce_batch=False)
+        l1_loss = l1_loss_per_sample.mean()
         metrics = {
             'loss/mse': mse,
             'loss/mse_per_sample': mse_per_sample,
+            'loss/l1_loss': l1_loss,
+            'loss/l1_loss_per_sample': l1_loss_per_sample,
         }
 
         if compute_metrics:
-            metrics.update(self.compute_metrics(preds, video[:, 1:], segmentation[:, 1:]))
+            if segmentation is not None:
+                metrics.update(self.compute_metrics(preds, video[:, 1:], segmentation[:, 1:]))
+            else:
+                metrics.update(self.compute_metrics(preds, video[:, 1:]))
 
         preds = dict(rgb=preds)
 
@@ -452,3 +483,16 @@ class FitVid(nn.Module):
         if self.policy_feature_metric:
             self.load_policy_networks()
             print('Reloaded policy networks')
+
+    def state_dict(self, *args, **kwargs):
+        prefixes_to_remove = ['rgb_loss']
+        # get superclass state_dict
+        state_dict = super().state_dict(*args, **kwargs)
+        # create another state dict without items having prefixes in prefixes_to_remove
+        new_state_dict = dict()
+        for k, v in state_dict.items():
+            if not any(prefix in k for prefix in prefixes_to_remove):
+                new_state_dict[k] = v
+        return new_state_dict
+
+

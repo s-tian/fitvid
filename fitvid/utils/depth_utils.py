@@ -50,23 +50,31 @@ def sobel_loss(t1, t2, reduce_batch=True):
     return mse_loss(t1_sobel, t2_sobel, reduce_batch=reduce_batch)
 
 
-def mse_loss(t1, t2, reduce_batch=True, mask=None):
-    mse = ((t1 - t2) ** 2)
+def pixel_wise_loss(t1, t2, loss='l2', reduce_batch=True, mask=None):
+    if loss == 'l2':
+        pwl = ((t1 - t2) ** 2)
+    elif loss == 'l1':
+        pwl = torch.abs(t1 - t2)
+    else:
+        raise NotImplementedError('Only l2 and l1 losses are implemented')
+
     if mask is not None:
-        mse = mask * mse
+        pwl = mask * pwl
     if reduce_batch:
-        return mse.mean()
+        return pwl.mean()
     else:
         reduce_dims = tuple(range(len(t1.shape)))
-        return mse.mean(dim=reduce_dims[1:])
+        return pwl.mean(dim=reduce_dims[1:])
 
-def mse_loss_segmented(t1, t2, segmentation, reduce_batch=True):
+
+def pixel_wise_loss_segmented(t1, t2, segmentation, loss='l2', reduce_batch=True):
     mask = torch.ones_like(t2).type(torch.uint8)
     segmentation = torch.tile(segmentation, (1, 1, 3, 1, 1))
     mask[segmentation != 1] = 0
     mask[segmentation == 1] = 1
-    mse = mse_loss(t1, t2, reduce_batch=reduce_batch, mask=mask)
-    return mse
+    pwl = pixel_wise_loss(t1, t2, loss=loss, reduce_batch=reduce_batch, mask=mask)
+    return pwl
+
 
 def test_mse_loss():
     t1, t2 = torch.randn((30, 20, 10)), torch.randn((30, 20, 10))
