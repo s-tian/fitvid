@@ -37,8 +37,7 @@ def fvd(vid1, vid2):
 
 
 def lpips(lpips, vid1, vid2):
-    with torch.no_grad():
-        return apply_function_metric(lambda x, y: lpips(x, y), vid1, vid2)
+    return apply_function_metric(lambda x, y: lpips(x, y), vid1, vid2)
 
 
 class PolicyFeatureL2Metric(nn.Module):
