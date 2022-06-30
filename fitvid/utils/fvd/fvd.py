@@ -11,18 +11,20 @@ i3d = None
 
 def get_fvd_logits(videos):
     global i3d
-    device = 'cuda'
     if i3d is None:
-        i3d = load_i3d_pretrained(device)
+        num_devices = torch.cuda.device_count()
+        devices = [f'cuda:{i}' for i in range(num_devices)]
+        i3d = {device: load_i3d_pretrained(device) for device in devices}
 
     videos = preprocess(videos)
     # B, C, T, H, W
     chunk_size = min(videos.shape[0], 16)
     with torch.no_grad():
         logits = []
+        i3d_model = i3d[f'{videos.device.type}:{videos.device.index}']
         for i in range(0, videos.shape[0], chunk_size):
-            batch = videos[i : i + chunk_size].to(device)
-            logits.append(i3d(batch))
+            batch = videos[i : i + chunk_size]
+            logits.append(i3d_model(batch))
         logits = torch.cat(logits, dim=0)
     return logits
 
