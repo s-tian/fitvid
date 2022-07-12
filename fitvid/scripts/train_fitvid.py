@@ -30,6 +30,7 @@ flags.DEFINE_integer('batch_size', 32, 'Batch size.')  # changed
 flags.DEFINE_integer('n_past', 2, 'Number of past frames.')
 flags.DEFINE_integer('n_future', 10, 'Number of future frames.')  # not used, inferred directly from data
 flags.DEFINE_integer('num_epochs', 1000, 'Number of steps to train for.')
+flags.DEFINE_integer('train_epoch_max_length', 45000, 'Max number of training batches per epoch. Actual epoch length will be min(dataset length, this value).')
 flags.DEFINE_float('beta', 1e-4, 'Weight on KL.')
 flags.DEFINE_string('data_in_gpu', 'True', 'whether to put data in GPU, or RAM')
 flags.DEFINE_string('rgb_loss_type', 'l2', 'whether to use l2 or l1 loss')
@@ -39,6 +40,7 @@ flags.DEFINE_boolean('stochastic', True, 'Use a stochastic model.')
 flags.DEFINE_boolean('multistep', False, 'Multi-step training.')  # changed
 flags.DEFINE_boolean('fp16', False, 'Use lower precision training for perf improvement.')  # changed
 flags.DEFINE_float('rgb_weight', 1, 'Weight on rgb objective (default 1).')
+flags.DEFINE_boolean('fitvid_augment', False, 'Use fitvid-style data augmentation.')  # changed
 
 # Model architecture
 flags.DEFINE_integer('z_dim', 10, 'LSTM output size.')  #
@@ -93,7 +95,7 @@ flags.DEFINE_string('re_eval', 'False', 'Re evaluate all available checkpoints s
 flags.DEFINE_integer('re_eval_bs', 20, 'bs override')
 
 
-def load_data(dataset_files, data_type='train', depth=False, normal=False, seg=True):
+def load_data(dataset_files, data_type='train', depth=False, normal=False, seg=True, augmentation=None):
     video_len = FLAGS.n_past + FLAGS.n_future
     if FLAGS.image_size:
         assert len(FLAGS.image_size) == 2, "Image size should be (H, W)"
@@ -102,7 +104,7 @@ def load_data(dataset_files, data_type='train', depth=False, normal=False, seg=T
         image_size = None
     return load_dataset_robomimic_torch(dataset_files, FLAGS.batch_size, video_len, image_size,
                                         data_type, depth, normal, view=FLAGS.camera_view, cache_mode=FLAGS.cache_mode,
-                                        seg=seg, only_depth=FLAGS.only_depth)
+                                        seg=seg, only_depth=FLAGS.only_depth, augmentation=augmentation)
 
 
 def get_most_recent_checkpoint(dir):
@@ -221,9 +223,15 @@ def main(argv):
     model.to('cuda:0')
 
     optimizer = torch.optim.Adam(model.parameters(), lr=FLAGS.lr, weight_decay=FLAGS.weight_decay)
+    image_size = [int(i) for i in FLAGS.image_size]
+
+    from fitvid.model.augmentations import FitVidAugment
+    if FLAGS.fitvid_augment:
+        image_augmentation = FitVidAugment(image_size)
+    else:
+        image_augmentation = None
 
     if FLAGS.hdf5_data:
-        image_size = [int(i) for i in FLAGS.image_size]
         data_loader = load_hdf5_data(FLAGS.dataset_file, FLAGS.batch_size, sel_len=FLAGS.n_past + FLAGS.n_future,
                                      image_size=image_size, data_type='train')
         test_data_loader = load_hdf5_data(FLAGS.dataset_file, FLAGS.batch_size, sel_len=FLAGS.n_past + FLAGS.n_future,
@@ -233,11 +241,11 @@ def main(argv):
         if FLAGS.debug:
             data_loader, prep_data = load_data(FLAGS.dataset_file, data_type='valid',
                                                depth=FLAGS.depth_model_path, normal=FLAGS.normal_model_path,
-                                               seg=FLAGS.has_segmentation)
+                                               seg=FLAGS.has_segmentation, augmentation=image_augmentation)
         else:
             data_loader, prep_data = load_data(FLAGS.dataset_file, data_type='train',
                                                depth=FLAGS.depth_model_path, normal=FLAGS.normal_model_path,
-                                               seg=FLAGS.has_segmentation)
+                                               seg=FLAGS.has_segmentation, augmentation=image_augmentation)
         test_data_loader, prep_data_test = load_data(FLAGS.dataset_file, data_type='valid',
                                                      depth=FLAGS.depth_model_path,
                                                      normal=FLAGS.normal_model_path,
@@ -438,7 +446,7 @@ def main(argv):
 
             wandb_log.update({f'train/{k}': v for k, v in metrics.items()})
             wandb.log(wandb_log)
-            if FLAGS.debug and batch_idx > 25:
+            if (FLAGS.debug and batch_idx > 25) or batch_idx > FLAGS.train_epoch_max_length:
                 break
 
         if epoch % FLAGS.save_freq == 0:

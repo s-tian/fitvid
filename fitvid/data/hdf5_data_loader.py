@@ -237,7 +237,6 @@ if __name__ == '__main__':
 
     for i_batch, sample_batched in enumerate(loader):
         print(i_batch)
-        import ipdb; ipdb.set_trace()
         images = np.asarray(sample_batched['video'])
 
         images = np.transpose((images + 1) / 2, [0, 1, 3, 4, 2])  # convert to channel-first

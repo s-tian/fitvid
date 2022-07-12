@@ -84,7 +84,7 @@ def get_data_loader(dataset_paths, batch_size, video_len, video_dims, phase, dep
 
 
 def load_dataset_robomimic_torch(dataset_path, batch_size, video_len, video_dims, phase, depth, normal, view='agentview',
-                                 cache_mode='low_dim', seg=True, only_depth=False, only_state=False):
+                                 cache_mode='low_dim', seg=True, only_depth=False, only_state=False, augmentation=None):
     assert phase in ['train', 'valid'], f'Phase is not one of the acceptable values! Got {phase}'
 
     loader = get_data_loader(dataset_path, batch_size, video_len, video_dims, phase, depth, normal, view, cache_mode, seg,
@@ -109,6 +109,10 @@ def load_dataset_robomimic_torch(dataset_path, batch_size, video_len, video_dims
                 'video': xs['obs'][get_image_name(view)],
                 'actions': xs['actions'],
             }
+
+        if augmentation:
+            data_dict["video"] = augmentation(data_dict["video"])
+
         if f'{view}_seg' in xs['obs']:
             data_dict['segmentation'] = xs['obs'][f'{view}_seg']
             # from perceptual_metrics.mpc.utils import save_np_img
@@ -134,6 +138,11 @@ def load_dataset_robomimic_torch(dataset_path, batch_size, video_len, video_dims
             data_dict['depth_video'] = xs['obs'][f'{view}_depth']
         if normal:
             data_dict['normal'] = xs['obs'][f'{view}_normal']
+
+        if "video" in data_dict:
+            # Normalize to [0, 1]
+            data_dict["video"] = data_dict["video"] / 255.
+
         return data_dict
 
     return loader, prepare_data
