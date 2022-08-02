@@ -105,4 +105,7 @@ def generate_text_square(text, size=(64, 64), fontscale=2.5):
 def save_moviepy_gif(obs_list, name, fps=5):
     from moviepy.editor import ImageSequenceClip
     clip = ImageSequenceClip(obs_list, fps=fps)
-    clip.write_gif(f'{name}.gif', fps=fps)
+    if name[:-4] != '.gif':
+        clip.write_gif(f'{name}.gif', fps=fps)
+    else:
+        clip.write_gif(name, fps=fps)

@@ -290,9 +290,6 @@ class FitVid(nn.Module):
         return total_loss, preds, metrics
 
     def predict_rgb(self, video, actions, hidden, skips):
-        if self.is_inference:
-            assert False
-
         batch_size, video_len = video.shape[0], video.shape[1]
         pred_state = post_state = prior_state = None
 
@@ -349,8 +346,6 @@ class FitVid(nn.Module):
 
     def _evaluate(self, batch, compute_metrics=False, autoregressive=True):
         """Predict the full video conditioned on the first self.n_past frames. """
-        if self.is_inference:
-            assert False
         video, actions, segmentation = batch['video'], batch['actions'], batch.get('segmentation', None)
         batch_size, video_len = video.shape[0], video.shape[1]
         pred_state = prior_state = post_state = None

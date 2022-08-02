@@ -363,10 +363,10 @@ def main(argv):
 
             batch_idx, batch = iter_item
             batch = dict_to_cuda(prep_data(batch))
-            if 'segmentation' in batch:
-                inputs = batch['video'], batch['actions'], batch['segmentation']
-            else:
-                inputs = batch['video'], batch['actions'], None
+
+            # get segmentations from data if they exist
+            batch_segmentations = batch.get('segmentation', None)
+            inputs = batch['video'], batch['actions'], batch_segmentations
 
             if depth_predictor_kwargs:
                 inputs = inputs + (batch['depth_video'],)

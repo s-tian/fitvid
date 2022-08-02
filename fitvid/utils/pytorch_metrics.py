@@ -28,6 +28,9 @@ def tv(vid1):
 
 
 def fvd(vid1, vid2):
+    if vid1.shape[-3] == 1 or vid1.shape[-4] <= 8:
+        # FVD can't be computed for grayscale images, or for videos which are too short
+        return 0
     with torch.cuda.amp.autocast(enabled=False):
         vid1 = (vid1 * 255).to(torch.uint8)
         vid2 = (vid2 * 255).to(torch.uint8)
