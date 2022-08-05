@@ -109,7 +109,7 @@ def load_dataset_robomimic_torch(dataset_path, batch_size, video_len, video_dims
                 'video': xs['obs'][get_image_name(view)],
                 'actions': xs['actions'],
             }
-
+        data_dict["rewards"] = xs["rewards"]
         if augmentation:
             data_dict["video"] = augmentation(data_dict["video"])
 
