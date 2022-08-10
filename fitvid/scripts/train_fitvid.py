@@ -36,6 +36,7 @@ flags.DEFINE_string('data_in_gpu', 'True', 'whether to put data in GPU, or RAM')
 flags.DEFINE_string('rgb_loss_type', 'l2', 'whether to use l2 or l1 loss')
 flags.DEFINE_float('lr', 1e-3, 'learning rate')
 flags.DEFINE_float('weight_decay', 0.0, 'weight decay value')
+flags.DEFINE_float('adam_eps', 1e-8, 'epsilon parameter for Adam optimizer')
 flags.DEFINE_boolean('stochastic', True, 'Use a stochastic model.')
 flags.DEFINE_boolean('multistep', False, 'Multi-step training.')  # changed
 flags.DEFINE_boolean('fp16', False, 'Use lower precision training for perf improvement.')  # changed
@@ -222,7 +223,7 @@ def main(argv):
     model = torch.nn.DataParallel(model)
     model.to('cuda:0')
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=FLAGS.lr, weight_decay=FLAGS.weight_decay)
+    optimizer = torch.optim.Adam(model.parameters(), lr=FLAGS.lr, eps=FLAGS.adam_eps, weight_decay=FLAGS.weight_decay)
     image_size = [int(i) for i in FLAGS.image_size]
 
     from fitvid.model.augmentations import FitVidAugment
@@ -282,9 +283,11 @@ def main(argv):
         model.eval()
         with torch.no_grad():
             epoch_mse = []
+            eval_metrics = dict()
+            wandb_log = dict()
             for iter_item in enumerate(tqdm(test_data_loader)):
-                wandb_log = dict()
                 test_batch_idx, batch = iter_item
+                total_test_batches = len(test_data_loader)
                 batch = dict_to_cuda(prep_data_test(batch))
                 with autocast() if FLAGS.fp16 else ExitStack() as ac:
                     metrics, eval_preds = model.module.evaluate(batch, compute_metrics=test_batch_idx % 1 == 0)
@@ -332,14 +335,17 @@ def main(argv):
                                 test_normal_visualization = build_visualization(**test_videos_log)
                                 wandb_log.update({f'{ag_type}/test_normal_vis': wandb.Video(test_normal_visualization, fps=4, format='gif')})
                 epoch_mse.append(metrics['ag/loss/mse'].item())
-                wandb_log.update({f'eval/{k}': v for k, v in metrics.items()})
-                wandb.log(wandb_log)
-                if FLAGS.debug and test_batch_idx > 25:
-                    break
-                if test_batch_idx == 50:
+                for k, v in metrics.items():
+                    if k in eval_metrics:
+                        eval_metrics[k].append(v)
+                    else:
+                        eval_metrics[k] = [v]
+                if (FLAGS.debug and test_batch_idx > 25) or test_batch_idx == 50 or test_batch_idx == total_test_batches - 1:
+                    wandb_log.update({f'eval/{k}': torch.stack(v).mean() for k, v in eval_metrics.items()})
+                    wandb.log(wandb_log)
                     break
             test_mse.append(np.mean(epoch_mse))
-        print(f'Test MSE: {epoch_mse[-1]}')
+        print(f'Test MSE: {np.mean(epoch_mse)}')
 
         if test_mse[-1] == np.min(test_mse):
             if not os.path.isdir(FLAGS.output_dir):
