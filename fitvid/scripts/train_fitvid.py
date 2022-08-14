@@ -35,6 +35,8 @@ flags.DEFINE_float('beta', 1e-4, 'Weight on KL.')
 flags.DEFINE_string('data_in_gpu', 'True', 'whether to put data in GPU, or RAM')
 flags.DEFINE_string('rgb_loss_type', 'l2', 'whether to use l2 or l1 loss')
 flags.DEFINE_float('lr', 1e-3, 'learning rate')
+flags.DEFINE_boolean('adamw_1cycle', False, 'use AdamW and 1cycle learning rate scheduler')
+flags.DEFINE_boolean('lecun_initialization', False, 'use LeCun weight initialization as in original implementation')
 flags.DEFINE_float('weight_decay', 0.0, 'weight decay value')
 flags.DEFINE_float('adam_eps', 1e-8, 'epsilon parameter for Adam optimizer')
 flags.DEFINE_boolean('stochastic', True, 'Use a stochastic model.')
@@ -191,6 +193,7 @@ def main(argv):
         expand_decoder=FLAGS.expand,
         stochastic=FLAGS.stochastic,
         video_channels=1 if FLAGS.only_depth else 3,
+        lecun_initialization=FLAGS.lecun_initialization,
     )
 
     model = FitVid(model_kwargs=model_kwargs,
@@ -223,7 +226,6 @@ def main(argv):
     model = torch.nn.DataParallel(model)
     model.to('cuda:0')
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=FLAGS.lr, eps=FLAGS.adam_eps, weight_decay=FLAGS.weight_decay)
     image_size = [int(i) for i in FLAGS.image_size]
 
     from fitvid.model.augmentations import FitVidAugment
@@ -251,6 +253,12 @@ def main(argv):
                                                      depth=FLAGS.depth_model_path,
                                                      normal=FLAGS.normal_model_path,
                                                      seg=FLAGS.has_segmentation)
+
+    if FLAGS.adamw_1cycle:
+        optimizer = torch.optim.AdamW(model.parameters(), lr=FLAGS.lr, eps=FLAGS.adam_eps, weight_decay=FLAGS.weight_decay)
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=1e-3, epochs=FLAGS.num_epochs, steps_per_epoch=min(FLAGS.train_epoch_max_length, len(data_loader)))
+    else:
+        optimizer = torch.optim.Adam(model.parameters(), lr=FLAGS.lr, eps=FLAGS.adam_eps, weight_decay=FLAGS.weight_decay)
 
     wandb.init(
         project=FLAGS.project,
@@ -405,6 +413,10 @@ def main(argv):
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 100)
                 optimizer.step()
+
+            if FLAGS.adamw_1cycle:
+                scheduler.step()
+
             train_steps += 1
             train_losses.append(loss.item())
             train_mse.append(metrics['loss/mse'].item())

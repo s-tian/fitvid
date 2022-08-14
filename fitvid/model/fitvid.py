@@ -37,6 +37,23 @@ class MultiGaussianLSTM(nn.Module):
         z_t = mean + var * epsilon
         return (z_t, mean, logvar), new_states
 
+def init_weights_lecun(m):
+    """
+    Perform LeCun normal initialization for parameters of module m
+    Since the default Flax initialization uses LeCun uniform, unlike pytorch default, we use this to try to match the
+    official implementation.
+    """
+    if isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear):
+        # Initialize weights to LeCun normal initialization
+        fan_in, fan_out = nn.init._calculate_fan_in_and_fan_out(m.weight)
+        std = np.sqrt(1 / fan_in)
+        nn.init.trunc_normal_(m.weight, mean=0, std=std, a=-2*std, b=2*std)
+        # Initialize biases to zero
+        if m.bias is not None:
+            nn.init.zeros_(m.bias)
+    elif isinstance(m, nn.BatchNorm2d):
+        nn.init.ones_(m.weight)
+        nn.init.zeros_(m.bias)
 
 class FitVid(nn.Module):
     """FitVid video predictor."""
@@ -78,6 +95,9 @@ class FitVid(nn.Module):
         input_size = self.get_input_size(model_kwargs['g_dim'], model_kwargs['action_size'], model_kwargs['z_dim'])
         self.frame_predictor = MultiGaussianLSTM(input_size=input_size, output_size=model_kwargs['g_dim'],
                                                  hidden_size=model_kwargs['rnn_size'], num_layers=2)
+
+        if model_kwargs.get("lecun_initialization", None):
+            self.apply(init_weights_lecun)
 
         self.lpips = piq.LPIPS()
 
