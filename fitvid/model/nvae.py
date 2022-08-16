@@ -32,8 +32,8 @@ class EncoderBlock(nn.Module):
 
         self.Conv_0 = nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=(3, 3), stride=stride, bias=False, padding=1) # pad = (kernel-1)//2
         self.Conv_1 = nn.Conv2d(in_channels=out_channels, out_channels=out_channels, kernel_size=(3, 3), bias=False, padding=1)
-        self.BatchNorm_0 = nn.BatchNorm2d(num_features=in_channels, eps=1e-5, momentum=0.9, affine=True, track_running_stats=True)
-        self.BatchNorm_1 = nn.BatchNorm2d(num_features=out_channels, eps=1e-5, momentum=0.9, affine=True, track_running_stats=True)
+        self.BatchNorm_0 = nn.BatchNorm2d(num_features=in_channels, eps=1e-5, momentum=0.1, affine=True, track_running_stats=True)
+        self.BatchNorm_1 = nn.BatchNorm2d(num_features=out_channels, eps=1e-5, momentum=0.1, affine=True, track_running_stats=True)
         self.act1 = nn.SiLU()
         self.act2 = nn.SiLU()
         self.act3 = nn.SiLU()
@@ -42,7 +42,7 @@ class EncoderBlock(nn.Module):
         if (in_channels != out_channels) or downsample:
             self.reshape_residual = True
             self.conv_proj = nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=(1, 1), stride=stride, bias=False, padding=0)
-            self.norm_proj = nn.BatchNorm2d(num_features=out_channels, eps=1e-5, momentum=0.9, affine=True, track_running_stats=True)
+            self.norm_proj = nn.BatchNorm2d(num_features=out_channels, eps=1e-5, momentum=0.1, affine=True, track_running_stats=True)
         else:
             self.reshape_residual = False
         self.act4 = nn.SiLU()
@@ -70,15 +70,15 @@ class DecoderBlock(nn.Module):
         self.upsample = upsample
         if self.upsample:
             self.upsample_layer = nn.Upsample(scale_factor=2)
-        self.BatchNorm_0 = nn.BatchNorm2d(num_features=in_channels, eps=1e-5, momentum=0.9, affine=True, track_running_stats=True)
+        self.BatchNorm_0 = nn.BatchNorm2d(num_features=in_channels, eps=1e-5, momentum=0.1, affine=True, track_running_stats=True)
         self.Conv_0 = nn.Conv2d(in_channels=in_channels, out_channels=out_channels*expand, kernel_size=(1, 1), bias=False, padding=0) # pad = (kernel-1)//2
-        self.BatchNorm_1 = nn.BatchNorm2d(num_features=out_channels*expand, eps=1e-5, momentum=0.9, affine=True, track_running_stats=True)
+        self.BatchNorm_1 = nn.BatchNorm2d(num_features=out_channels*expand, eps=1e-5, momentum=0.1, affine=True, track_running_stats=True)
         self.act1 = nn.SiLU()
         self.Conv_1 = nn.Conv2d(in_channels=out_channels*expand, out_channels=out_channels*expand, kernel_size=(5, 5), bias=False, padding=2) # pad = (kernel-1)//2
-        self.BatchNorm_2 = nn.BatchNorm2d(num_features=out_channels*expand, eps=1e-5, momentum=0.9, affine=True, track_running_stats=True)
+        self.BatchNorm_2 = nn.BatchNorm2d(num_features=out_channels*expand, eps=1e-5, momentum=0.1, affine=True, track_running_stats=True)
         self.act2 = nn.SiLU()
         self.Conv_2 = nn.Conv2d(in_channels=out_channels*expand, out_channels=out_channels, kernel_size=(1, 1), bias=False, padding=0) # pad = (kernel-1)//2
-        self.BatchNorm_3 = nn.BatchNorm2d(num_features=out_channels, eps=1e-5, momentum=0.9, affine=True, track_running_stats=True)
+        self.BatchNorm_3 = nn.BatchNorm2d(num_features=out_channels, eps=1e-5, momentum=0.1, affine=True, track_running_stats=True)
         param = self.BatchNorm_3.state_dict()['weight']
         param.copy_(torch.zeros_like(param))
         # for the 3 lines above, original code is: y = self.norm(scale_init=nn.initializers.zeros)(y)
@@ -87,7 +87,7 @@ class DecoderBlock(nn.Module):
         if in_channels != out_channels:
             self.reshape_residual = True
             self.conv_proj = nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=(1, 1), bias=False, padding=0)
-            self.norm_proj = nn.BatchNorm2d(num_features=out_channels, eps=1e-5, momentum=0.9, affine=True, track_running_stats=True)
+            self.norm_proj = nn.BatchNorm2d(num_features=out_channels, eps=1e-5, momentum=0.1, affine=True, track_running_stats=True)
         else:
             self.reshape_residual = False
         self.act3 = nn.SiLU()
