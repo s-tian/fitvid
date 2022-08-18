@@ -172,6 +172,7 @@ def get_most_recent_checkpoint(dir):
     else:
         os.mkdir(dir)
     existing_checkpoints = glob.glob(os.path.join(dir, "model_epoch*"))
+    existing_checkpoints = [c for c in existing_checkpoints if "opt" not in c]
     if existing_checkpoints:
         checkpoint_nums = [
             int(s.split("/")[-1][len("model_epoch") :]) for s in existing_checkpoints
@@ -180,6 +181,16 @@ def get_most_recent_checkpoint(dir):
         return existing_checkpoints[best_ind], max(checkpoint_nums)
     else:
         return None, -1
+
+
+def save_model_checkpoint(model, optimizer, name):
+    if not os.path.isdir(FLAGS.output_dir):
+        os.mkdir(FLAGS.output_dir)
+    save_path = os.path.join(FLAGS.output_dir, f"model_{name}")
+    optimizer_save_path = os.path.join(FLAGS.output_dir, f"model_{name}_opt")
+    torch.save(model.module.state_dict(), save_path)
+    torch.save(optimizer.state_dict(), optimizer_save_path)
+    print(f"Saved model to {save_path}")
 
 
 def main(argv):
@@ -365,6 +376,9 @@ def main(argv):
             weight_decay=FLAGS.weight_decay,
         )
 
+    if checkpoint:
+        optimizer.load_state_dict(torch.load(f"{checkpoint}_opt"))
+
     wandb.init(
         project=FLAGS.project,
         reinit=True,
@@ -516,11 +530,7 @@ def main(argv):
         print(f"Test MSE: {np.mean(epoch_mse)}")
 
         if test_mse[-1] == np.min(test_mse):
-            if not os.path.isdir(FLAGS.output_dir):
-                os.mkdir(FLAGS.output_dir)
-            save_path = os.path.join(FLAGS.output_dir, f"model_best")
-            torch.save(model.module.state_dict(), save_path)
-            print(f"Saved new best model to {save_path}")
+            save_model_checkpoint(model, optimizer, "best")
 
         print("Training")
         model.train()
@@ -654,13 +664,7 @@ def main(argv):
                 break
 
         if epoch % FLAGS.save_freq == 0:
-            if os.path.isdir(FLAGS.output_dir):
-                pass
-            else:
-                os.mkdir(FLAGS.output_dir)
-            save_path = os.path.join(FLAGS.output_dir, f"model_epoch{epoch}")
-            torch.save(model.module.state_dict(), save_path)
-            print(f"Saved model to {save_path}")
+            save_model_checkpoint(model, optimizer, f"epoch{epoch}")
         else:
             print("Skip saving models")
 

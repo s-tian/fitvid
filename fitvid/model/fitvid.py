@@ -236,6 +236,9 @@ class FitVid(nn.Module):
         return torch.sum(kld) / batch_size
 
     def compute_metrics(self, vid1, vid2, segmentation=None):
+        if not (torch.all(torch.isfinite(vid1)) and torch.all(torch.isfinite(vid2))):
+            return dict()
+
         with torch.no_grad():
             metrics = {
                 "metrics/psnr": psnr(vid1, vid2),
