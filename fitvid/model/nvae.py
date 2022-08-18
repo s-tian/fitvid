@@ -69,7 +69,7 @@ class DecoderBlock(nn.Module):
         super(DecoderBlock, self).__init__()
         self.upsample = upsample
         if self.upsample:
-            self.upsample_layer = nn.Upsample(scale_factor=2)
+            self.upsample_layer = nn.UpsamplingNearest2d(scale_factor=2)
         self.BatchNorm_0 = nn.BatchNorm2d(num_features=in_channels, eps=1e-5, momentum=0.1, affine=True, track_running_stats=True)
         self.Conv_0 = nn.Conv2d(in_channels=in_channels, out_channels=out_channels*expand, kernel_size=(1, 1), bias=False, padding=0) # pad = (kernel-1)//2
         self.BatchNorm_1 = nn.BatchNorm2d(num_features=out_channels*expand, eps=1e-5, momentum=0.1, affine=True, track_running_stats=True)
@@ -80,7 +80,8 @@ class DecoderBlock(nn.Module):
         self.Conv_2 = nn.Conv2d(in_channels=out_channels*expand, out_channels=out_channels, kernel_size=(1, 1), bias=False, padding=0) # pad = (kernel-1)//2
         self.BatchNorm_3 = nn.BatchNorm2d(num_features=out_channels, eps=1e-5, momentum=0.1, affine=True, track_running_stats=True)
         param = self.BatchNorm_3.state_dict()['weight']
-        param.copy_(torch.zeros_like(param))
+        with torch.no_grad():
+            param.copy_(torch.zeros_like(param))
         # for the 3 lines above, original code is: y = self.norm(scale_init=nn.initializers.zeros)(y)
         self.SEBlock_0 = SEBlock(out_channels)
 

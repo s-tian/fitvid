@@ -18,7 +18,7 @@ import wandb
 from fitvid.data.robomimic_data import load_dataset_robomimic_torch
 from fitvid.data.hdf5_data_loader import load_hdf5_data
 from fitvid.model.fitvid import FitVid
-from fitvid.utils.utils import dict_to_cuda
+from fitvid.utils.utils import dict_to_cuda, count_parameters
 from fitvid.utils.vis_utils import save_moviepy_gif, build_visualization
 
 FLAGS = flags.FLAGS
@@ -126,10 +126,12 @@ def get_most_recent_checkpoint(dir):
 
 def main(argv):
     import random
-    random.seed(FLAGS.seed)
-    torch.manual_seed(FLAGS.seed)
-    np.random.seed(FLAGS.seed)
-    os.environ['PYTHONHASHSEED'] = str(FLAGS.seed)
+
+    if FLAGS.seed: # If seed is not set, use a random one
+        random.seed(FLAGS.seed)
+        torch.manual_seed(FLAGS.seed)
+        np.random.seed(FLAGS.seed)
+        os.environ['PYTHONHASHSEED'] = str(FLAGS.seed)
 
     torch.backends.cudnn.benchmark = True
     torch.backends.cudnn.enabled = True
@@ -207,6 +209,7 @@ def main(argv):
                    rgb_loss_type=FLAGS.rgb_loss_type,
                    corr_wise=FLAGS.corr_wise,
                    )
+    print(f"Built FitVid model with {count_parameters(model)} parameters!")
 
     NGPU = torch.cuda.device_count()
     print('CUDA available devices: ', NGPU)
@@ -293,9 +296,9 @@ def main(argv):
             epoch_mse = []
             eval_metrics = dict()
             wandb_log = dict()
+            total_test_batches = len(test_data_loader)
             for iter_item in enumerate(tqdm(test_data_loader)):
                 test_batch_idx, batch = iter_item
-                total_test_batches = len(test_data_loader)
                 batch = dict_to_cuda(prep_data_test(batch))
                 with autocast() if FLAGS.fp16 else ExitStack() as ac:
                     metrics, eval_preds = model.module.evaluate(batch, compute_metrics=test_batch_idx % 1 == 0)

@@ -10,10 +10,8 @@ from fitvid.utils.pytorch_metrics import psnr, lpips, ssim, tv, fvd, PolicyFeatu
 
 import piq
 
-
 class MultiGaussianLSTM(nn.Module):
     """Multi layer lstm with Gaussian output."""
-
     def __init__(self, input_size, output_size, hidden_size, num_layers):
         super(MultiGaussianLSTM, self).__init__()
 
@@ -54,6 +52,19 @@ def init_weights_lecun(m):
     elif isinstance(m, nn.BatchNorm2d):
         nn.init.ones_(m.weight)
         nn.init.zeros_(m.bias)
+    elif isinstance(m, nn.LSTM):
+        # Handle LSTMs. In jax, the kernels which transform the input are initialized with LeCun normal, and the
+        # ones which transform the hidden state are initialized with orthogonal.
+        for name, param in m.named_parameters():
+            if 'weight_hh' in name:
+                for i in range(0, param.shape[0], param.shape[0]//4):
+                    nn.init.orthogonal_(param[i:i+param.shape[0]//4])
+            elif 'weight_ih' in name:
+                fan_in, fan_out = nn.init._calculate_fan_in_and_fan_out(param)
+                std = np.sqrt(1 / fan_in)
+                nn.init.trunc_normal_(param, mean=0, std=std, a=-2 * std, b=2 * std)
+            elif 'bias' in name:
+                nn.init.zeros_(param)
 
 class FitVid(nn.Module):
     """FitVid video predictor."""
@@ -78,6 +89,7 @@ class FitVid(nn.Module):
         self.encoder = ModularEncoder(stage_sizes=model_kwargs['stage_sizes'], output_size=model_kwargs['g_dim'],
                                       num_base_filters=model_kwargs['num_base_filters'],
                                       num_input_channels=self.num_video_channels)
+
         if self.stochastic:
             self.prior = MultiGaussianLSTM(input_size=model_kwargs['g_dim'], output_size=model_kwargs['z_dim'],
                                            hidden_size=model_kwargs['rnn_size'], num_layers=1)
@@ -228,9 +240,9 @@ class FitVid(nn.Module):
                     mse_per_sample = pixel_wise_loss(preds['rgb'], video[:, 1:], loss='l2', reduce_batch=False, mask=None)
                     l1_per_sample = pixel_wise_loss(preds['rgb'], video[:, 1:], loss='l1', reduce_batch=False, mask=None)
                 total_loss += self.rgb_loss(preds['rgb'], video[:, 1:]) * weight
-                metrics['loss/mse'] = mse_per_sample.mean()
+                metrics['loss/mse'] = mse_per_sample.mean().detach()
                 metrics['loss/mse_per_sample'] = mse_per_sample.detach()
-                metrics['loss/l1_loss'] = l1_per_sample.mean()
+                metrics['loss/l1_loss'] = l1_per_sample.mean().detach()
                 metrics['loss/l1_loss_per_sample'] = l1_per_sample.detach()
             elif loss == 'segmented_object':
                 if weight > 0:
@@ -331,7 +343,7 @@ class FitVid(nn.Module):
                 means.append(mu)
                 logvars.append(logvar)
                 kld += self.kl_divergence(mu, logvar, prior_mu, prior_logvar, batch_size)
-                pred = self.decoder(h_pred[None, :], skips)[0]
+                pred = self.decoder(h_pred, skips, has_time_dim=False)
                 preds.append(pred)
             preds = torch.stack(preds, axis=1)
         else:
