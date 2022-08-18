@@ -8,7 +8,7 @@ class CorrWiseLoss(CorrWise):
 
     def forward(self, pred, target):
         input_shape = pred.shape
-        if len(input_shape) == 5: # video
+        if len(input_shape) == 5:  # video
             # reshape pred to be [batch*time, channel, height, width]
             pred = pred.reshape(-1, *input_shape[2:])
             target = target.reshape(-1, *input_shape[2:])

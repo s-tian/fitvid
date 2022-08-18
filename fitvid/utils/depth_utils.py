@@ -5,9 +5,9 @@ import torch
 
 
 DEFAULT_WEIGHT_LOCATIONS = {
-    'dpt': '/viscam/u/stian/perceptual-metrics/MiDaS/weights/dpt_hybrid-midas-501f0c75.pt',
-    'mn': '/viscam/u/stian/perceptual-metrics/MiDaS/weights/midas_v21-f6b98070.pt',
-    'mns': '/viscam/u/stian/perceptual-metrics/MiDaS/weights/midas_v21_small-70d6b9c8.pt'
+    "dpt": "/viscam/u/stian/perceptual-metrics/MiDaS/weights/dpt_hybrid-midas-501f0c75.pt",
+    "mn": "/viscam/u/stian/perceptual-metrics/MiDaS/weights/midas_v21-f6b98070.pt",
+    "mns": "/viscam/u/stian/perceptual-metrics/MiDaS/weights/midas_v21_small-70d6b9c8.pt",
 }
 
 
@@ -29,7 +29,7 @@ def normalize_depth_npy(t, across_dims=1):
     return t
 
 
-def depth_to_rgb_im(im, cmap=plt.get_cmap('jet_r')):
+def depth_to_rgb_im(im, cmap=plt.get_cmap("jet_r")):
     # shape = [(T), 1, W, H]
     if len(im.shape) >= 3 and im.shape[-3] == 1:
         im = np.squeeze(im, axis=-3)
@@ -42,21 +42,24 @@ def depth_to_rgb_im(im, cmap=plt.get_cmap('jet_r')):
 
 def sobel_loss(t1, t2, reduce_batch=True):
     from kornia.filters import sobel
+
     original_shape = t1.shape
     compress_shape = (-1,) + tuple(t1.shape[-3:])  # change to (B, C, H, W)
     t1, t2 = torch.reshape(t1, compress_shape), torch.reshape(t2, compress_shape)
     t1_sobel, t2_sobel = sobel(t1), sobel(t2)
-    t1_sobel, t2_sobel = torch.reshape(t1_sobel, original_shape), torch.reshape(t2_sobel, original_shape)
+    t1_sobel, t2_sobel = torch.reshape(t1_sobel, original_shape), torch.reshape(
+        t2_sobel, original_shape
+    )
     return mse_loss(t1_sobel, t2_sobel, reduce_batch=reduce_batch)
 
 
-def pixel_wise_loss(t1, t2, loss='l2', reduce_batch=True, mask=None):
-    if loss == 'l2':
-        pwl = ((t1 - t2) ** 2)
-    elif loss == 'l1':
+def pixel_wise_loss(t1, t2, loss="l2", reduce_batch=True, mask=None):
+    if loss == "l2":
+        pwl = (t1 - t2) ** 2
+    elif loss == "l1":
         pwl = torch.abs(t1 - t2)
     else:
-        raise NotImplementedError('Only l2 and l1 losses are implemented')
+        raise NotImplementedError("Only l2 and l1 losses are implemented")
 
     if mask is not None:
         pwl = mask * pwl
@@ -67,7 +70,7 @@ def pixel_wise_loss(t1, t2, loss='l2', reduce_batch=True, mask=None):
         return pwl.mean(dim=reduce_dims[1:])
 
 
-def pixel_wise_loss_segmented(t1, t2, segmentation, loss='l2', reduce_batch=True):
+def pixel_wise_loss_segmented(t1, t2, segmentation, loss="l2", reduce_batch=True):
     mask = torch.ones_like(t2).type(torch.uint8)
     segmentation = torch.tile(segmentation, (1, 1, 3, 1, 1))
     mask[segmentation != 1] = 0
@@ -80,12 +83,14 @@ def test_mse_loss():
     t1, t2 = torch.randn((30, 20, 10)), torch.randn((30, 20, 10))
     my_mse = mse_loss(t1, t2, reduce_batch=True)
     torch_mse = torch.nn.functional.mse_loss(t1, t2)
-    print(f'Mine: {my_mse}, nn.Functional: {torch_mse}')
+    print(f"Mine: {my_mse}, nn.Functional: {torch_mse}")
     assert torch.allclose(my_mse, torch_mse), "Reducing all dimensions doesn't match"
     per_sample_mse = mse_loss(t1, t2, reduce_batch=False)
-    assert torch.allclose(torch_mse, per_sample_mse.mean()), 'Not reducing yields different results'
-    print(f'Mine: {per_sample_mse.mean()}, nn.Functional: {torch_mse}')
+    assert torch.allclose(
+        torch_mse, per_sample_mse.mean()
+    ), "Not reducing yields different results"
+    print(f"Mine: {per_sample_mse.mean()}, nn.Functional: {torch_mse}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     test_mse_loss()

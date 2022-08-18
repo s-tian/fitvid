@@ -9,11 +9,12 @@ from fitvid.utils.fvd.download_i3d import load_i3d_pretrained
 
 i3d = None
 
+
 def get_fvd_logits(videos):
     global i3d
     if i3d is None:
         num_devices = torch.cuda.device_count()
-        devices = [f'cuda:{i}' for i in range(num_devices)]
+        devices = [f"cuda:{i}" for i in range(num_devices)]
         i3d = {device: load_i3d_pretrained(device) for device in devices}
 
     videos = preprocess(videos)
@@ -21,7 +22,7 @@ def get_fvd_logits(videos):
     chunk_size = min(videos.shape[0], 16)
     with torch.no_grad():
         logits = []
-        i3d_model = i3d[f'{videos.device.type}:{videos.device.index}']
+        i3d_model = i3d[f"{videos.device.type}:{videos.device.index}"]
         for i in range(0, videos.shape[0], chunk_size):
             batch = videos[i : i + chunk_size]
             logits.append(i3d_model(batch))
@@ -45,17 +46,13 @@ def preprocess_single(video, resolution, sequence_length=None):
         target_size = (resolution, math.ceil(w * scale))
     else:
         target_size = (math.ceil(h * scale), resolution)
-    video = F.interpolate(
-        video, size=target_size, mode="bilinear", align_corners=False
-    )
+    video = F.interpolate(video, size=target_size, mode="bilinear", align_corners=False)
 
     # center crop
     t, c, h, w = video.shape
     w_start = (w - resolution) // 2
     h_start = (h - resolution) // 2
-    video = video[
-            :, :, h_start : h_start + resolution, w_start : w_start + resolution
-            ]
+    video = video[:, :, h_start : h_start + resolution, w_start : w_start + resolution]
     video = video.permute(1, 0, 2, 3).contiguous()  # CTHW
 
     video -= 0.5
@@ -68,7 +65,9 @@ def preprocess(videos, target_resolution=224):
     b, t, c, h, w = videos.shape
     if isinstance(videos, np.ndarray):
         videos = torch.from_numpy(videos)
-    assert isinstance(videos, torch.Tensor), 'Videos should either be np.ndarray or torch.Tensor!'
+    assert isinstance(
+        videos, torch.Tensor
+    ), "Videos should either be np.ndarray or torch.Tensor!"
     videos = torch.permute(videos, (0, 1, 3, 4, 2))
     videos = torch.stack(
         [preprocess_single(video, target_resolution) for video in videos]
@@ -147,13 +146,17 @@ def main():
     # The FVD for this setup should be around 131.
 
     # b, t, h, w, c
-    first_set_of_videos = np.zeros([NUMBER_OF_VIDEOS, VIDEO_LENGTH, 3, 64, 64], dtype=np.uint8)
-    second_set_of_videos = np.ones([NUMBER_OF_VIDEOS, VIDEO_LENGTH, 3, 64, 64], dtype=np.uint8) * 255
+    first_set_of_videos = np.zeros(
+        [NUMBER_OF_VIDEOS, VIDEO_LENGTH, 3, 64, 64], dtype=np.uint8
+    )
+    second_set_of_videos = (
+        np.ones([NUMBER_OF_VIDEOS, VIDEO_LENGTH, 3, 64, 64], dtype=np.uint8) * 255
+    )
     emb1 = get_fvd_logits(first_set_of_videos)
     emb2 = get_fvd_logits(second_set_of_videos)
 
     result = frechet_distance(emb1, emb2)  # 134
-    print('computed:', result, 'reference: 131')
+    print("computed:", result, "reference: 131")
 
 
 if __name__ == "__main__":

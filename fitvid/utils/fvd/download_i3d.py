@@ -37,7 +37,8 @@ def download(
     URL = "https://drive.google.com/uc?export=download"
 
     import gdown
-    url = f'https://drive.google.com/uc?id={id}'
+
+    url = f"https://drive.google.com/uc?id={id}"
     output = destination
     gdown.download(url, output, quiet=False)
     # session = requests.Session()
@@ -57,13 +58,20 @@ _I3D_PRETRAINED_ID = "1mQK8KD8G6UWRa5t87SRMm5PVXtlpneJT"
 
 def load_i3d_pretrained(device=torch.device("cpu")):
     from fitvid.utils.fvd.pytorch_i3d import InceptionI3d
+
     i3d = InceptionI3d(400, in_channels=3).to(device)
-    filepath = download(_I3D_PRETRAINED_ID, "i3d_pretrained_400.pt", pathlib.Path(__file__).parent.resolve())
+    filepath = download(
+        _I3D_PRETRAINED_ID,
+        "i3d_pretrained_400.pt",
+        pathlib.Path(__file__).parent.resolve(),
+    )
     i3d.load_state_dict(torch.load(filepath, map_location=device))
     i3d.eval()
     return i3d
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     i3d = load_i3d_pretrained()
-    import ipdb; ipdb.set_trace()
+    import ipdb
+
+    ipdb.set_trace()

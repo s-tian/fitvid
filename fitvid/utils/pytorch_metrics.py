@@ -44,11 +44,10 @@ def lpips(lpips, vid1, vid2):
 
 
 class PolicyFeatureL2Metric(nn.Module):
-
     def __init__(self, policy_path, layer):
         super().__init__()
         self.image_policy = create_image_policy()
-        print(f'Loading policy for metric computation from {policy_path}...')
+        print(f"Loading policy for metric computation from {policy_path}...")
         self.image_policy.load_state_dict(torch.load(policy_path))
         self.image_policy.eval()
 
@@ -61,15 +60,20 @@ class PolicyFeatureL2Metric(nn.Module):
         def get_activation(name):
             def hook(model, input, output):
                 device = output.device  # prevent multi-GPU concurrency issues
-                self.activation[f'{device}/{name}'] = output
+                self.activation[f"{device}/{name}"] = output
+
             return hook
 
         ### Layer should be 'fc*' or 'conv*', which will determine the layer for which the hook is applied
         layer_num = int(layer[-1])
-        if 'fc' in layer:
-            self.image_policy.fc_layers[layer_num].register_forward_hook(get_activation('feats'))
-        elif 'conv' in layer:
-            self.image_policy.conv_layers[layer_num].register_forward_hook(get_activation('feats'))
+        if "fc" in layer:
+            self.image_policy.fc_layers[layer_num].register_forward_hook(
+                get_activation("feats")
+            )
+        elif "conv" in layer:
+            self.image_policy.conv_layers[layer_num].register_forward_hook(
+                get_activation("feats")
+            )
 
     def get_device(self):
         return self.image_policy.conv_layers[0].weight.device
@@ -83,7 +87,7 @@ class PolicyFeatureL2Metric(nn.Module):
         leading_dims = im.shape[:-3]
         im = flatten_image(im)
         actions = self.image_policy(im.contiguous())
-        activations = self.activation[f'{self.get_device()}/feats'].clone()
+        activations = self.activation[f"{self.get_device()}/feats"].clone()
         activations = activations.reshape(leading_dims + (-1,))
         assert activations.shape[:-1] == leading_dims
 
@@ -98,24 +102,27 @@ class PolicyFeatureL2Metric(nn.Module):
         """
         im1, im2 = flatten_image(im1), flatten_image(im2)
         im1_actions = self.image_policy(im1)
-        im1_activations = self.activation[f'{self.get_device()}/feats'].clone()
+        im1_activations = self.activation[f"{self.get_device()}/feats"].clone()
         im2_actions = self.image_policy(im2)
-        im2_activations = self.activation[f'{self.get_device()}/feats'].clone()
+        im2_activations = self.activation[f"{self.get_device()}/feats"].clone()
         action_mse = torch.linalg.norm(im1_actions - im2_actions, dim=0).mean()
-        activation_mse = torch.linalg.norm(im1_activations - im2_activations, dim=0).mean()
+        activation_mse = torch.linalg.norm(
+            im1_activations - im2_activations, dim=0
+        ).mean()
         return action_mse, activation_mse
 
 
 def test_policy_feature_metric():
     policy_metric = PolicyFeatureL2Metric(
-        '/viscam/u/stian/perceptual-metrics/perceptual-metrics/perceptual_metrics/distilled_longer.pkl',
-        'fc0')
+        "/viscam/u/stian/perceptual-metrics/perceptual-metrics/perceptual_metrics/distilled_longer.pkl",
+        "fc0",
+    )
     image_1 = torch.randn(8, 10, 3, 64, 64).cuda()
     image_2 = torch.randn(8, 10, 3, 64, 64).cuda()
     action_mse, feat_mse = policy_metric(image_1, image_2)
-    print('action mse', action_mse)
-    print('feat mse', feat_mse)
+    print("action mse", action_mse)
+    print("feat mse", feat_mse)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     test_policy_feature_metric()

@@ -35,12 +35,15 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 FLAGS = flags.FLAGS
-flags.DEFINE_spaceseplist('eval_folders', [], 'Dataset to load.')
-flags.DEFINE_spaceseplist('friendly_model_names', [], 'Friendly model names')
-flags.DEFINE_boolean('valid', True, 'use validation data')
+flags.DEFINE_spaceseplist("eval_folders", [], "Dataset to load.")
+flags.DEFINE_spaceseplist("friendly_model_names", [], "Friendly model names")
+flags.DEFINE_boolean("valid", True, "use validation data")
+
 
 def get_data_batches(n):
-    data_itr, prep_data = load_data(FLAGS.dataset_file, 'valid' if FLAGS.valid else 'train', depth=True)
+    data_itr, prep_data = load_data(
+        FLAGS.dataset_file, "valid" if FLAGS.valid else "train", depth=True
+    )
     data_itr = iter(data_itr)
     batches = []
     for i in range(5):
@@ -61,46 +64,53 @@ def get_model_predictions(model, ckp, batches):
         if FLAGS.depth_objective:
             preds, depth_preds = preds
             depth_preds_all.append(depth_preds)
-            gt_depths.append(batch['depth_video'][:, 1:])
+            gt_depths.append(batch["depth_video"][:, 1:])
         preds_all.append(preds * 255)
-        gt.append(batch['video'][:, 1:] * 255)
-    return torch.cat(gt), torch.cat(gt_depths), torch.cat(preds_all), torch.cat(depth_preds_all)
+        gt.append(batch["video"][:, 1:] * 255)
+    return (
+        torch.cat(gt),
+        torch.cat(gt_depths),
+        torch.cat(preds_all),
+        torch.cat(depth_preds_all),
+    )
 
 
 def log_eval_gifs():
     """Evaluates the latest model checkpoint."""
     import random
+
     random.seed(0)
     torch.manual_seed(0)
     np.random.seed(0)
-    os.environ['PYTHONHASHSEED'] = str(0)
+    os.environ["PYTHONHASHSEED"] = str(0)
 
-    model = FitVid(stage_sizes=[int(i) for i in FLAGS.stage_sizes],
-                   z_dim=FLAGS.z_dim,
-                   g_dim=FLAGS.g_dim,
-                   rnn_size=FLAGS.rnn_size,
-                   num_base_filters=FLAGS.num_base_filters,
-                   first_block_shape=[int(i) for i in FLAGS.first_block_shape],
-                   skip_type=FLAGS.skip_type,
-                   n_past=FLAGS.n_past,
-                   action_conditioned=eval(FLAGS.action_conditioned),
-                   action_size=4,  # hardcode for now
-                   is_inference=False,
-                   has_depth_predictor=FLAGS.depth_objective,
-                   expand_decoder=FLAGS.expand,
-                   beta=FLAGS.beta,
-                   tv_weight=FLAGS.tv_weight,
-                   depth_weight=FLAGS.depth_weight,
-                   pretrained_depth_path=FLAGS.depth_model_path,
-                   depth_model_size=FLAGS.depth_model_size,
-                   freeze_depth_model=FLAGS.freeze_pretrained,
-                   segmentation_loss_weight=0,
-                   segmentation_depth_loss_weight=FLAGS.segmentation_depth_loss_weight,
-                   policy_feature_path=FLAGS.policy_feature_path,
-                   policy_feature_weight=FLAGS.policy_feature_weight
-                   )
+    model = FitVid(
+        stage_sizes=[int(i) for i in FLAGS.stage_sizes],
+        z_dim=FLAGS.z_dim,
+        g_dim=FLAGS.g_dim,
+        rnn_size=FLAGS.rnn_size,
+        num_base_filters=FLAGS.num_base_filters,
+        first_block_shape=[int(i) for i in FLAGS.first_block_shape],
+        skip_type=FLAGS.skip_type,
+        n_past=FLAGS.n_past,
+        action_conditioned=eval(FLAGS.action_conditioned),
+        action_size=4,  # hardcode for now
+        is_inference=False,
+        has_depth_predictor=FLAGS.depth_objective,
+        expand_decoder=FLAGS.expand,
+        beta=FLAGS.beta,
+        tv_weight=FLAGS.tv_weight,
+        depth_weight=FLAGS.depth_weight,
+        pretrained_depth_path=FLAGS.depth_model_path,
+        depth_model_size=FLAGS.depth_model_size,
+        freeze_depth_model=FLAGS.freeze_pretrained,
+        segmentation_loss_weight=0,
+        segmentation_depth_loss_weight=FLAGS.segmentation_depth_loss_weight,
+        policy_feature_path=FLAGS.policy_feature_path,
+        policy_feature_weight=FLAGS.policy_feature_weight,
+    )
     NGPU = torch.cuda.device_count()
-    print('CUDA available devices: ', NGPU)
+    print("CUDA available devices: ", NGPU)
 
     # checkpoint = FLAGS.eval_folder
     # print(f'Attempting to load from checkpoint {checkpoint if checkpoint else "None, no model found"}')
@@ -118,10 +128,12 @@ def log_eval_gifs():
     def numpify(x):
         return x.detach().cpu().numpy()
 
-    cmap= plt.get_cmap('jet_r')
+    cmap = plt.get_cmap("jet_r")
     gt, depth_gt, _, _ = eval_outputs[0]
     tlen = gt.shape[1]
-    header_items = ['GT'] + FLAGS.friendly_model_names + ['GT Depth'] + FLAGS.friendly_model_names
+    header_items = (
+        ["GT"] + FLAGS.friendly_model_names + ["GT Depth"] + FLAGS.friendly_model_names
+    )
     # generate header
     text_headers = [generate_text_square(h) for h in header_items]
     text_headers = np.concatenate(text_headers, axis=-1)
@@ -141,15 +153,16 @@ def log_eval_gifs():
     image_row = np.concatenate(image_row, axis=-2)
     image_row = np.concatenate((text_headers, image_row), axis=-2)
     image_row = np.moveaxis(image_row, 1, 3)
-    tag = 'valid' if FLAGS.valid else 'train'
-    save_moviepy_gif(list(image_row), f'multimodel_sobel_eval_{tag}')
+    tag = "valid" if FLAGS.valid else "train"
+    save_moviepy_gif(list(image_row), f"multimodel_sobel_eval_{tag}")
+
 
 def main(argv):
     del argv  # Unused
     log_eval_gifs()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     # We assume that checkpoints are in the output_dir
-    flags.mark_flags_as_required(['output_dir'])
+    flags.mark_flags_as_required(["output_dir"])
     app.run(main)
