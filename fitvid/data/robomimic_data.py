@@ -4,6 +4,9 @@ import numpy as np
 from robomimic.utils.dataset import SequenceDataset
 import robomimic.utils.obs_utils as ObsUtils
 from torch.utils.data import DataLoader, ConcatDataset
+
+# Hacky import, in newer versions of pytorch this is easier to import
+from torch.utils.data.dataloader import default_collate
 from torchvision.transforms import Resize
 
 
@@ -23,6 +26,7 @@ def get_data_loader(
     depth,
     normal,
     view,
+    collate_fn,
     cache_mode="lowdim",
     seg=True,
     only_depth=False,
@@ -95,6 +99,7 @@ def get_data_loader(
         shuffle=True,
         num_workers=4,
         drop_last=True,  # don't provide last batch in dataset pass if it's less than 100 in size
+        collate_fn=collate_fn,
     )
     return data_loader
 
@@ -119,22 +124,10 @@ def load_dataset_robomimic_torch(
         "valid",
     ], f"Phase is not one of the acceptable values! Got {phase}"
 
-    loader = get_data_loader(
-        dataset_path,
-        batch_size,
-        video_len,
-        video_dims,
-        phase,
-        depth,
-        normal,
-        view,
-        cache_mode,
-        seg,
-        only_depth,
-        only_state,
-    )
-
-    def prepare_data(xs):
+    def prepare_data(input_batch):
+        # prepare_data is a custom collate function which not only batches the data from the dataset, but also
+        # creates the output dictionaries which contain keys "video" and "actions"
+        xs = default_collate(input_batch)
         if only_state:
             data_dict = {
                 "video": torch.cat(
@@ -202,7 +195,23 @@ def load_dataset_robomimic_torch(
 
         return data_dict
 
-    return loader, prepare_data
+    loader = get_data_loader(
+        dataset_path,
+        batch_size,
+        video_len,
+        video_dims,
+        phase,
+        depth,
+        normal,
+        view,
+        collate_fn=prepare_data,
+        cache_mode=cache_mode,
+        seg=seg,
+        only_depth=only_depth,
+        only_state=only_state,
+    )
+
+    return loader
 
 
 if __name__ == "__main__":

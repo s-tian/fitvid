@@ -327,10 +327,9 @@ def main(argv):
             image_size=image_size,
             data_type="val",
         )
-        prep_data = prep_data_test = lambda x: x
     else:
         if FLAGS.debug:
-            data_loader, prep_data = load_data(
+            data_loader = load_data(
                 FLAGS.dataset_file,
                 data_type="valid",
                 depth=FLAGS.depth_model_path,
@@ -339,7 +338,7 @@ def main(argv):
                 augmentation=image_augmentation,
             )
         else:
-            data_loader, prep_data = load_data(
+            data_loader = load_data(
                 FLAGS.dataset_file,
                 data_type="train",
                 depth=FLAGS.depth_model_path,
@@ -347,7 +346,7 @@ def main(argv):
                 seg=FLAGS.has_segmentation,
                 augmentation=image_augmentation,
             )
-        test_data_loader, prep_data_test = load_data(
+        test_data_loader = load_data(
             FLAGS.dataset_file,
             data_type="valid",
             depth=FLAGS.depth_model_path,
@@ -416,7 +415,7 @@ def main(argv):
             total_test_batches = len(test_data_loader)
             for iter_item in enumerate(tqdm(test_data_loader)):
                 test_batch_idx, batch = iter_item
-                batch = dict_to_cuda(prep_data_test(batch))
+                batch = dict_to_cuda(batch)
                 with autocast() if FLAGS.fp16 else ExitStack() as ac:
                     metrics, eval_preds = model.module.evaluate(
                         batch, compute_metrics=test_batch_idx % 1 == 0
@@ -546,7 +545,7 @@ def main(argv):
             wandb_log = dict()
 
             batch_idx, batch = iter_item
-            batch = dict_to_cuda(prep_data(batch))
+            batch = dict_to_cuda(batch)
 
             # get segmentations from data if they exist
             batch_segmentations = batch.get("segmentation", None)
