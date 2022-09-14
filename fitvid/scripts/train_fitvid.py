@@ -15,7 +15,6 @@ from tqdm import tqdm
 import moviepy
 import wandb
 
-from fitvid.data.robomimic_data import load_dataset_robomimic_torch
 from fitvid.data.hdf5_data_loader import load_hdf5_data
 from fitvid.model.fitvid import FitVid
 from fitvid.utils.utils import dict_to_cuda, count_parameters
@@ -82,6 +81,7 @@ flags.DEFINE_string(
 # Model saving
 flags.DEFINE_string("output_dir", None, "Path to model checkpoints/summaries.")
 flags.DEFINE_integer("save_freq", 10, "number of steps between checkpoints")
+flags.DEFINE_integer("save_at_num_steps", 150000, "save checkpoint at number of steps")
 flags.DEFINE_boolean(
     "wandb_online", None, "Use wandb online mode (probably should disable on cluster)"
 )
@@ -90,6 +90,7 @@ flags.DEFINE_string("project", "perceptual-metrics", "wandb project name")
 # Data
 flags.DEFINE_spaceseplist("dataset_file", [], "Dataset to load.")
 flags.DEFINE_boolean("hdf5_data", None, "using hdf5 data")
+flags.DEFINE_boolean("robonet_data", None, "using robonet data")
 flags.DEFINE_string("cache_mode", "low_dim", "Dataset cache mode")
 flags.DEFINE_string(
     "camera_view", "agentview", 'Camera view of data to load. Default is "agentview".'
@@ -150,6 +151,8 @@ def load_data(
         image_size = [int(i) for i in FLAGS.image_size]
     else:
         image_size = None
+    from fitvid.data.robomimic_data import load_dataset_robomimic_torch
+
     return load_dataset_robomimic_torch(
         dataset_files,
         FLAGS.batch_size,
@@ -231,15 +234,19 @@ def main(argv):
     else:
         policy_network_kwargs = None
 
-    total_weights = FLAGS.rgb_weight + FLAGS.depth_weight + FLAGS.normal_weight
-    if total_weights > 0:
-        rgb_weight = FLAGS.rgb_weight / total_weights
-        depth_weight = FLAGS.depth_weight / total_weights
-        normal_weight = FLAGS.normal_weight / total_weights
-    else:
-        rgb_weight = 0
-        depth_weight = 0
-        normal_weight = 0
+    # total_weights = FLAGS.rgb_weight + FLAGS.depth_weight + FLAGS.normal_weight
+    # if total_weights > 0:
+    #     rgb_weight = FLAGS.rgb_weight / total_weights
+    #     depth_weight = FLAGS.depth_weight / total_weights
+    #     normal_weight = FLAGS.normal_weight / total_weights
+    # else:
+    #     rgb_weight = 0
+    #     depth_weight = 0
+    #     normal_weight = 0
+
+    rgb_weight = FLAGS.rgb_weight
+    depth_weight = FLAGS.depth_weight
+    normal_weight = FLAGS.normal_weight
 
     loss_weights = {
         "kld": FLAGS.beta,
@@ -326,6 +333,23 @@ def main(argv):
             sel_len=FLAGS.n_past + FLAGS.n_future,
             image_size=image_size,
             data_type="val",
+        )
+    elif FLAGS.robonet_data:
+        from fitvid.data.robonet import load_robonet_data
+
+        data_loader = load_robonet_data(
+            FLAGS.dataset_file[0],
+            FLAGS.dataset_file[1],
+            "train",
+            FLAGS.batch_size,
+            FLAGS.n_past + FLAGS.n_future,
+        )
+        test_data_loader = load_robonet_data(
+            FLAGS.dataset_file[0],
+            FLAGS.dataset_file[1],
+            "valid",
+            FLAGS.batch_size,
+            FLAGS.n_past + FLAGS.n_future,
         )
     else:
         if FLAGS.debug:
@@ -540,8 +564,14 @@ def main(argv):
         else:
             model.module.loss_weights["depth"] = depth_weight
             model.module.loss_weights["normal"] = normal_weight
+        generator = iter(data_loader)
+        for iter_idx in tqdm(range(FLAGS.train_epoch_max_length)):
+            try:
+                iter_item = iter_idx, next(generator)
+            except StopIteration:
+                generator = iter(data_loader)
+                iter_item = iter_idx, next(generator)
 
-        for iter_item in enumerate(tqdm(data_loader)):
             wandb_log = dict()
 
             batch_idx, batch = iter_item
@@ -657,6 +687,8 @@ def main(argv):
 
             wandb_log.update({f"train/{k}": v for k, v in metrics.items()})
             wandb.log(wandb_log)
+            if train_steps == FLAGS.save_at_num_steps:
+                save_model_checkpoint(model, optimizer, f"epoch{train_steps}")
             if (
                 FLAGS.debug and batch_idx > 25
             ) or batch_idx > FLAGS.train_epoch_max_length:

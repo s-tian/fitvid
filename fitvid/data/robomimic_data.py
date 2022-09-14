@@ -50,19 +50,21 @@ def get_data_loader(
         }
     )
 
+    obs_keys = tuple()
+    if not only_depth and not only_state:
+        obs_keys = obs_keys + (imageview_name,)
+    if depth or only_depth:
+        obs_keys = obs_keys + (f"{view}_depth",)
+    if seg:
+        obs_keys = obs_keys + (f"{view}_seg",)
+    if normal:
+        obs_keys = obs_keys + (f"{view}_normal",)
+
     all_datasets = []
+
     for i, dataset_path in enumerate(dataset_paths):
         # obs_keys = (f"{view}_image", f"{view}_segmentation_instance")
         # obs_keys = ("object", "robot0_eef_pos", "robot0_eef_quat")
-        obs_keys = tuple()
-        if not only_depth and not only_state:
-            obs_keys = obs_keys + (imageview_name,)
-        if depth or only_depth:
-            obs_keys = obs_keys + (f"{view}_depth",)
-        if seg:
-            obs_keys = obs_keys + (f"{view}_seg",)
-        if normal:
-            obs_keys = obs_keys + (f"{view}_normal",)
 
         dataset = SequenceDataset(
             hdf5_path=dataset_path,
@@ -118,6 +120,7 @@ def load_dataset_robomimic_torch(
     only_depth=False,
     only_state=False,
     augmentation=None,
+    postprocess_fn=None,
 ):
     assert phase in [
         "train",
@@ -192,6 +195,9 @@ def load_dataset_robomimic_torch(
         if "video" in data_dict:
             # Normalize to [0, 1]
             data_dict["video"] = data_dict["video"] / 255.0
+
+        if postprocess_fn:
+            data_dict = postprocess_fn(data_dict)
 
         return data_dict
 
