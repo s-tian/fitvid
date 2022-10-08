@@ -91,6 +91,8 @@ flags.DEFINE_string("project", "perceptual-metrics", "wandb project name")
 flags.DEFINE_spaceseplist("dataset_file", [], "Dataset to load.")
 flags.DEFINE_boolean("hdf5_data", None, "using hdf5 data")
 flags.DEFINE_boolean("robonet_data", None, "using robonet data")
+flags.DEFINE_boolean("additional_finetune_data", None, "using finetuning data with robonet")
+flags.DEFINE_boolean("only_finetune", None, "only finetuning data with robonet")
 flags.DEFINE_string("cache_mode", "low_dim", "Dataset cache mode")
 flags.DEFINE_string(
     "camera_view", "agentview", 'Camera view of data to load. Default is "agentview".'
@@ -152,7 +154,6 @@ def load_data(
     else:
         image_size = None
     from fitvid.data.robomimic_data import load_dataset_robomimic_torch
-
     return load_dataset_robomimic_torch(
         dataset_files,
         FLAGS.batch_size,
@@ -336,21 +337,10 @@ def main(argv):
         )
     elif FLAGS.robonet_data:
         from fitvid.data.robonet import load_robonet_data
-
-        data_loader = load_robonet_data(
-            FLAGS.dataset_file[0],
-            FLAGS.dataset_file[1],
-            "train",
-            FLAGS.batch_size,
-            FLAGS.n_past + FLAGS.n_future,
-        )
-        test_data_loader = load_robonet_data(
-            FLAGS.dataset_file[0],
-            FLAGS.dataset_file[1],
-            "valid",
-            FLAGS.batch_size,
-            FLAGS.n_past + FLAGS.n_future,
-        )
+        data_loader = load_robonet_data(FLAGS.dataset_file[0], FLAGS.dataset_file[1], "train",
+                                        FLAGS.batch_size, FLAGS.n_past + FLAGS.n_future, additional_finetune_data=FLAGS.additional_finetune_data, only_finetune=FLAGS.only_finetune)
+        test_data_loader = load_robonet_data(FLAGS.dataset_file[0], FLAGS.dataset_file[1], "val",
+                                        FLAGS.batch_size, FLAGS.n_past + FLAGS.n_future, additional_finetune_data=FLAGS.additional_finetune_data, only_finetune=FLAGS.only_finetune)
     else:
         if FLAGS.debug:
             data_loader = load_data(
@@ -437,6 +427,7 @@ def main(argv):
             eval_metrics = dict()
             wandb_log = dict()
             total_test_batches = len(test_data_loader)
+            print(f"Total test batches: {total_test_batches}")
             for iter_item in enumerate(tqdm(test_data_loader)):
                 test_batch_idx, batch = iter_item
                 batch = dict_to_cuda(batch)
