@@ -2,6 +2,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import lpips as lpips_module
 
 from fitvid.model.nvae import ModularEncoder, ModularDecoder
 from fitvid.model.depth_predictor import DepthPredictor
@@ -12,7 +13,6 @@ from fitvid.utils.pytorch_metrics import (
     ssim,
     tv,
     fvd,
-    PolicyFeatureL2Metric,
 )
 
 import piq
@@ -148,6 +148,7 @@ class FitVid(nn.Module):
             self.apply(init_weights_lecun)
 
         self.lpips = piq.LPIPS()
+        # self.official_lpips = lpips_module.LPIPS(net="alex").cuda()
 
         self.rgb_loss_type = kwargs.get("rgb_loss_type", "l2")
 

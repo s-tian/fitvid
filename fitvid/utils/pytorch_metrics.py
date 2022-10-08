@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import piq
-from perceptual_metrics.scripts.distill_policy import create_image_policy
 from fitvid.utils.fvd.fvd import get_fvd_logits, frechet_distance
 
 
