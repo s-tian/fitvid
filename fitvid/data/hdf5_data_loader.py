@@ -147,7 +147,8 @@ class FixLenVideoDataset(BaseVideoDataset):
             self.data_dir = [self.data_dir]
         all_filenames = []
         for data_dir in self.data_dir:
-            assert "hdf5" not in data_dir, "hdf5 most not be contained in the data dir!"
+            #assert "hdf5" not in data_dir, "hdf5 most not be contained in the data dir!"
+            assert os.path.basename(os.path.normpath(data_dir)) != "hdf5", "Please point the directory one level above the folder called 'hdf5'."
             filenames = sorted(
                 glob.glob(
                     os.path.join(data_dir, os.path.join("hdf5", self.phase) + "/*")
