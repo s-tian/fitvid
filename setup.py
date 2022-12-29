@@ -1,8 +1,8 @@
-from setuptools import setup
+from setuptools import setup, find_packages
 
 setup(
     name='fitvid',
     version='0.1',
-    packages=['fitvid'],
+    packages=find_packages(),
     license='MIT License',
 )
